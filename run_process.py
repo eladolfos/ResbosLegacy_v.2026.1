@@ -8,8 +8,8 @@ right energy / PDF / boson in every .in file, and chain the jobs with shards.
 
 The .ini names a SOURCE folder that holds get_yk_new/ legacy/ resbos/ w_asym/ w_pert/
 (e.g. templates/7TeV_WpWm) and a DEST folder.  Only what a run needs is copied to
-DEST: the executables (from the source, or from [executables] in the .ini, e.g. the
-ones built by setup_resbos_legacy.sb), the grids (./inp/*.inp) and make_dummy_rai.py.  The source
+DEST: the executables (the fresh build in bin/ made by setup_resbos_legacy.sb, or the
+ones named in [executables] in the .ini; never the old ones inside the source), the grids (./inp/*.inp) and make_dummy_rai.py.  The source
 does NOT need the outputs of earlier steps: get_yk_new needs the w_pert / w_asym /
 legacy outputs and resbos needs the legacy and Yk grids, so each of those jobs
 brings its inputs next to itself (symlink or copy) when it starts, once the upstream
@@ -168,13 +168,14 @@ class Cfg:
         return v.strip()
 
     def exe_src(self, folder, exe):
-        """Executable to copy for <folder>: [executables] <folder> = file; else [executables] dir = <dir>/<folder>/<exe>;
-        else <source>/<folder>/<exe>."""
+        """Executable to copy for <folder>: [executables] <folder> = file; else <dir>/<folder>/<exe> with
+        [executables] dir (default: bin/ next to this script, where setup_resbos_legacy.sb puts the fresh build).
+        The executables stored in the source template are never used unless dir points at it."""
         p = self.get("executables", folder, "").strip()
         if p:
             return self.rel(p)
         d = self.get("executables", "dir", "").strip()
-        return os.path.join(self.rel(d), folder, exe) if d else os.path.join(self.src, folder, exe)
+        return os.path.join(self.rel(d) if d else os.path.join(HERE, "bin"), folder, exe)
 
     def shards(self, stage):
         return int(self.get("shards", stage.split("_")[0] if stage.startswith("legacy") else stage, "1"))
@@ -322,7 +323,16 @@ def build(cfg, args):
     print(f"grid: {counts['Q']} Q x {counts['qT']} qT x {counts['y']} y; active {npts} points")
 
     # ---- copy only what a run needs
+    exes = [(f, STAGES[k][1]) for f, k in (("w_pert", "w_pert"), ("w_asym", "w_asym"), ("legacy", "legacy_Y"))]
+    exes += [("get_yk_new", "get_yk_new"), ("resbos", "resbos_root")]
+    missing = [cfg.exe_src(f, e) for f, e in exes if not os.path.isfile(cfg.exe_src(f, e))]
+    if missing:                     # check all before copying anything: no half-made dest
+        die("executable(s) not found:\n       " + "\n       ".join(missing) + "\n"
+            "       build them first with:  sbatch setup_resbos_legacy.sb   (writes bin/<code>/<exe>)\n"
+            "       or point to them in the .ini:  [executables] dir = <folder>  (or one key per code)")
+
     print(f"copying to {cfg.dest}")
+
     def copy_exe(folder, exe):
         src = cfg.exe_src(folder, exe)
         print(f"  {folder}/{exe} <- {src}")
