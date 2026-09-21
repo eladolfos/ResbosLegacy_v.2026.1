@@ -1,0 +1,127 @@
+#!/bin/bash --login
+#SBATCH --job-name=setup_resbos_legacy
+#SBATCH --output=slurm_setup_%j.out
+#SBATCH --error=slurm_setup_%j.err
+#SBATCH --time=02:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
+#SBATCH --partition=general-long
+
+# setup_resbos_legacy.sb -- compile w_pert, w_asym, Legacy (main), get_yk_new and resbos_root
+# from their CURRENT sources and leave the executables in  <OUT>/<folder>/<exe>.
+# Only bash + module + make are used (no python, no conda).
+#
+# Usage, from the folder that holds the five source directories (the one with this file):
+#     sbatch setup_resbos_legacy.sb                         # compile on a compute node
+#     bash -l setup_resbos_legacy.sb                        # or directly on the login node
+#     ONLY="legacy resbos" sbatch setup_resbos_legacy.sb    # only some of them
+#     OUT=templates/7TeV_WpWm sbatch setup_resbos_legacy.sb # refresh the executables of a template
+#
+# Then, in the campaign .ini:
+#     [executables]
+#     dir = bin
+#
+# The source folders are NOT touched (they hold checked-in binaries and .o files): the
+# top-level source files of each one are copied to $BUILD/<folder>/ and compiled there from
+# scratch, so no stale .o can be linked.  Per-code logs: $BUILD/<folder>/build.log
+#
+# Settings (environment variables, defaults in brackets):
+#   OUT        where <folder>/<exe> is written                     [bin]   (relative to this folder)
+#   BUILD      scratch folder for the compilation                  [build]
+#   ONLY       codes to build                                      [w_pert w_asym legacy get_yk_new resbos]
+#   MODULES    modules to load                                     [GCC/13.2.0 OpenMPI/4.1.6-GCC-13.2.0 powertools]
+#   LHAPDF     LHAPDF install (bin/ has lhapdf-config)             [/mnt/home/lopezels/InstallSources/LHAPDF]
+#   HOPPET     HOPPET install (lib/ has libhoppet_v1)              [/mnt/home/lopezels/InstallSources/HOPPET1]
+#   ROOT_SETUP thisroot.sh, sourced only for resbos                [/mnt/home/lopezels/InstallSources/ROOT/bin/thisroot.sh]
+#   NO_ENV     1 = do not touch modules/paths, use the current shell  [0]
+
+ROOT_DIR=${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}
+cd "$ROOT_DIR" || exit 1
+
+OUT=${OUT:-bin}
+BUILD=${BUILD:-build}
+ONLY=${ONLY:-"w_pert w_asym legacy get_yk_new resbos"}
+MODULES=${MODULES:-"GCC/13.2.0 OpenMPI/4.1.6-GCC-13.2.0 powertools"}
+LHAPDF=${LHAPDF:-/mnt/home/lopezels/InstallSources/LHAPDF}
+HOPPET=${HOPPET:-/mnt/home/lopezels/InstallSources/HOPPET1}
+ROOT_SETUP=${ROOT_SETUP:-/mnt/home/lopezels/InstallSources/ROOT/bin/thisroot.sh}
+NO_ENV=${NO_ENV:-0}
+JOBS=${SLURM_CPUS_PER_TASK:-4}
+case $OUT   in /*) ;; *) OUT=$ROOT_DIR/$OUT ;; esac
+case $BUILD in /*) ;; *) BUILD=$ROOT_DIR/$BUILD ;; esac
+
+# per code: source directory, executable name (= make target), tools that must be in PATH
+declare -A SRCDIR=( [w_pert]=w_pert_08112022 [w_asym]=w_asym_08112022 [legacy]=legacy_final_vesion
+                    [get_yk_new]=get_yk_new  [resbos]=resbos )
+declare -A EXE=(    [w_pert]=w_pert [w_asym]=w_asym [legacy]=main [get_yk_new]=get_yk_new [resbos]=resbos_root )
+declare -A TOOLS=(  [w_pert]="gfortran g++ make lhapdf-config" [w_asym]="gfortran g++ make lhapdf-config"
+                    [legacy]="gfortran g++ make lhapdf-config" [get_yk_new]="gfortran make"
+                    [resbos]="gfortran g++ make root-config" )
+
+# one build = one subshell, so module/ROOT settings never leak from one code to the next.
+# Called as a plain statement (no set -e / || around it) so that set -e works in the inner subshell.
+build_one() (
+  name=$1
+  src=$ROOT_DIR/${SRCDIR[$name]}
+  bdir=$BUILD/$name
+  exe=${EXE[$name]}
+  [ -f "$src/Makefile" ] || { echo "ERROR: $src/Makefile not found"; exit 1; }
+
+  # fresh build dir with only the top-level sources (.f .for .c .cc .cpp .h .inc, includes such as common.for) + Makefile
+  rm -rf "$bdir"; mkdir -p "$bdir" || exit 1
+  find "$src" -maxdepth 1 -type f \( -name Makefile -o -name '*.f' -o -name '*.for' -o -name '*.F' \
+       -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) \
+       -exec cp -p {} "$bdir"/ \; || exit 1
+  echo "[$name] $(ls "$bdir" | wc -l) files -> $bdir; building $exe"
+
+  (   # set -e is only effective here because this subshell is not run as an if/|| condition
+    set -e
+    if [ "$NO_ENV" != 1 ]; then
+      module purge
+      module load $MODULES
+      [ "$name" = resbos ] && source "$ROOT_SETUP"
+      export PATH=$LHAPDF/bin:$HOPPET/bin:$PATH
+      export LD_LIBRARY_PATH=$LHAPDF/lib:$HOPPET/lib:$LD_LIBRARY_PATH
+    fi
+    for t in ${TOOLS[$name]}; do
+      command -v "$t" >/dev/null || { echo "ERROR: '$t' not found in PATH"; exit 127; }
+    done
+    gfortran --version | head -1
+    cd "$bdir"
+    if [ "$name" = legacy ]; then
+      # the Makefile hardcodes HOPPETLIBS to one user's install; use $HOPPET instead
+      make -j"$JOBS" "$exe" HOPPETLIBS="-L$HOPPET/lib -lhoppet_v1"
+    else
+      make -j"$JOBS" "$exe"
+    fi
+    [ -s "$bdir/$exe" ] || { echo "ERROR: make finished but $exe was not produced"; exit 1; }
+    ldd "$bdir/$exe" | grep "not found" && echo "WARNING: unresolved libraries above (they must be on LD_LIBRARY_PATH at run time)" || true
+  ) > "$bdir/build.log" 2>&1
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    echo "[$name] FAILED (exit $rc); last lines of $bdir/build.log:"; tail -n 25 "$bdir/build.log"; exit 1
+  fi
+
+  mkdir -p "$OUT/$name" && cp -f "$bdir/$exe" "$OUT/$name/$exe" && chmod 755 "$OUT/$name/$exe" || exit 1
+  echo "[$name] OK  $OUT/$name/$exe  ($(du -h "$OUT/$name/$exe" | cut -f1))"
+)
+
+for name in $ONLY; do
+  [ -n "${SRCDIR[$name]}" ] || { echo "ERROR: unknown code '$name' (valid: w_pert w_asym legacy get_yk_new resbos)"; exit 2; }
+done
+
+failed=""
+for name in $ONLY; do
+  build_one "$name"; [ $? -eq 0 ] || failed="$failed $name"
+done
+
+if [ -n "$failed" ]; then
+  echo "ERROR: build failed for:$failed  (logs: $BUILD/<folder>/build.log)"
+  exit 1
+fi
+echo
+echo "All built. In the campaign .ini use:"
+echo "[executables]"
+echo "dir = ${OUT#$ROOT_DIR/}"
