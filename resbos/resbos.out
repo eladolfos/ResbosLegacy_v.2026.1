@@ -1,0 +1,22 @@
+  Input file --------------------------------------- 
+ 1,30,30000,50,500000,182019                               > # runs; test itera
+ ./Resbos_grids/legacy_zd_w321_8TeV.out                                > Main d
+ ./Resbos_grids/legacy_zd_ykR_8TeV.out                                 > Y piec
+ 0, 0, 0, 2, 1, 0                                         > Un/reweight,kKFacP&
+ 0.0, -10, 0.0, 10000.0, 10                              > Cuts(1): pTlmin,ymin
+ 66.0, 116.0, 0.0, 900., -99.0, 99.0                    > Cuts(2): QMn,QMx,QTMn
+ 0.0, 10000.,0.0                                          > Cuts(3):min,max tra
+ 1.0, 173.5,125.0                                         > Luminosity (pb^-1),
+ ROOTNT1                                                  > Output fromat      
+ 1.5, 903, 0, 5, 0, 0, 0, 0.0                             > qT_Sep,PDF,Proc,Sc,
+ WW,0                                                     > hDecay, i_decay    
+ 80.385, 2.108                                                    > W mass and 
+ 91.1876, 2.498353                                                    > Z mass 
+ 1, 1, 0, 0							 > EW flag, qed flag, CKM_flag, KFAC_ANGFUNC                 
+                                                                               
+                                                                               
+                                                                               
+ =======================================================================       
+ NOTE: PHOTOS currently only works for the StdHEP output format.               
+                                                                               
+  -------------------------------------------------- 

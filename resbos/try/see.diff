@@ -1,0 +1,10 @@
+5168,5169c5168
+< CCPY Oct 2021          QT2_V_MAX=QT_V_MXY**2
+<           QT2_V_MAX=MIN(QT_V_MXY**2,QT_V_MAX**2)
+---
+>           QT2_V_MAX=QT_V_MXY**2
+5199,5200c5198
+< CCPY OCt 2021          QT2_V_MAX=QT_V_MXY**2
+<           QT2_V_MAX=MIN(QT_V_MXY**2,QT_V_MAX**2)
+---
+>           QT2_V_MAX=QT_V_MXY**2

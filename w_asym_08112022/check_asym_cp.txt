@@ -1,0 +1,99 @@
+(1) Inside Legacy
+Inside pert.for
+==========
+      IF (NO_SIGMA0.EQ.1) THEN
+         CONST=1.0D0/2.0D0
+      ELSE
+
+===========
+      SUBROUTINE ASYMPTO(A_X_A,A_X_B,A_Q,ASYMP)
+
+      IF(LTOPT.EQ.0) THEN ! FOR ASYMPTOTIC PART
+C       THIS IS d(SIGMA)/d(Q^2)d(QT^2)d(Y)
+        ASYMP_SYM=HBARC2*CONST/ECM2*ASYMP_SYM*A_ALPI/(2.0*QT_V**2)
+     >        /PREV_UNDER/PREV_UNDER
+
+C       CONVERT TO d(SIGMA)/d(Q^2)d(QT)d(Y)
+        ASYMP_SYM=ASYMP_SYM*2.0*QT_V
+
+=====
+UNIT=1.0D0
+HBARC2=UNIT**2*0.38937966D0*1.0D9
+
+=>
+MZ =    91.117999999999995 
+const, a_alpi  0.5       3.78293638285568043E-002
+
+(2)
+Inside w_asym.for
+=============
+ 
+        COUPL=1.0D0
+
+        asym_1=ADYPT(vpt,rapin,1)
+        asym_2=ADYPT(vpt,rapin,2)
+
+        asym_1=asym_1*2.0*VPT*COUPL
+        asym_2=asym_2*2.0*VPT*COUPL
+
+=============
+Inside asym_ZU_uub.f and asym_ZD_ddb.f
+
+      function adypt(qt0,y0,mord0)
+
+        parameter (pi=3.141592654)
+        parameter (gevxpb=3.8938568e8)
+
+        adypt = gevxpb * pi/3./ss/qt**2 * charge(asig)
+
+===============
+      function charge(sig)
+	  
+      else if (jwtype.eq.jz) then
+        uub1 = sig(nu1,nub2) + sig(nc1,ncb2)
+     1       + sig(nub1,nu2) + sig(ncb1,nc2)
+        ddb1 = sig(nd1,ndb2) + sig(nst1,nstb2) + sig(nb1,nbb2)
+     1       + sig(ndb1,nd2) + sig(nstb1,nst2) + sig(nbb1,nb2)
+CZL
+        charge = ggu*uub1 <== for ZU
+
+        charge = ggd*ddb1 <== for ZD 
+
+==>
+  ggu, ggd =  4.03192291623900023E-002  5.19761809822488277E-002
+
+==========
+      if (jwtype.eq.jwp.or.jwtype.eq.jwm) then
+=>
+  ggw =  0.10660000145435333
+
+==========
+
+      function asig(n1,n2)
+
+      al2pi = alpi(qmu)/2.0
+
+      asig = al2pi*asig1 + al2pi**2*asig2 
+      
+
+
+(3) Compare the above two results:
+
+Hence, for Asym^{(1)}, at the alpha_s^{(1)} order, the ratio of 
+
+(w_asy)/(Legacy) is 
+
+(2*pi/3)*(ggu) for ZU
+and
+(2*pi/3)*(ggd) for ZD 
+and
+(2*pi/3)*(ggw) for W+ and W- 
+
+where
+ ggu, ggd =  4.03192291623900023E-002  5.19761809822488277E-002
+and
+  ggw =  0.10660000145435333
+
+=========================
+
+

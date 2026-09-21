@@ -1,0 +1,1555 @@
+CCPY 
+C March 2022: Update to use RA_4 from MCFM
+C Feb 2021: Implement it for W^\pm productions
+C Oct 05, 2020: Use NNLO L0 and A3 and R_Ai for ZU and ZD productions
+C The NNLO result is from the code by Arnold and Reno
+C The R_Ai, for angular functions, is from the FCFM code 
+C To run this code
+C
+C FOR ZU and ZU productions
+C ./get_yk_new w_pert_ZU.out w_asym_ZU.out legacy_y_ZU.out R_Ai_LHC8_66Q116.txt legacy_ykR_ZU.out.NLO ZU NLO CT14nn.00
+C or
+C ./get_yk_new w_pert_ZU.out w_asym_ZU.out legacy_y_ZU.out R_Ai_LHC8_66Q116.txt legacy_ykR_ZU.out.NNLO ZU NNLO CT14nn.00
+C
+C FOR W+ and W- prodctions
+C ./get_yk_new w_pert_wp_tev2.out w_asym_wp_tev2.out legacy_y_wp_tev2.out R_Ai_tev2_wp.txt legacy_ykR_wp_tev2.out.NLO W+ NLO CT14nn.00
+C or
+C ./get_yk_new w_pert_wp_tev2.out w_asym_wp_tev2.out legacy_y_wp_tev2.out R_Ai_tev2_wp.txt legacy_ykR_wp_tev2.out.NNLO W+ NNLO CT14nn.00
+C =============
+C
+      program gety_kfac
+      IMPLICIT NONE
+
+      Integer iYPiece, iReadIn
+      Common / YPiece / iYPiece, iReadIn
+      Integer iYPSw
+      Common / YPertSwitch / iYPSw
+      Integer iKFacP,iKFacY,iYGrid
+      Common / KFactor / iKFacP,iKFacY,iYGrid
+      Character*40 Boson
+      Common / Boson / Boson
+	  real*8 SigY,ErrSgY 
+      Dimension SigY (0:3)
+      real*8 ECMC
+      Common /ECMC/ ECMC
+	  
+      Character*78 dummy
+      CHARACTER*45 FILE_w_pert,FILE_w_asy,FILE_Y_NLO,FILE_Y_K, 
+     > FILE_R_AI,jobname,PDF_SET
+      integer ninp,nina,niny,nout,line_p,i_drop_lines,i,jlen
+      parameter (ninp=21, nina=22, niny=23, nout=25)
+      
+      real x1p, x2p, x3p, x1a, x2a, x3a,X1R,X2R,X3R
+      real*8 t1,t2,p_L0,p_A3,a_L0,a_A3,y(8),R_A0,R_A1,R_A2,R_A4,
+     > eps,p_L01,p_A31,a_L01,a_A31,p_L02,p_A32,a_L02,a_A32
+      real*8 pk_L0, pk_A3, ak_L0, ak_A3
+
+      real*8 ggu,ggd,Facu,Facd,pi,convert,ggw,facw,convert_0
+      character*5  itype,iorder
+
+      real*8 Q_V,QT_V,YB_V,QT_V_HERE,ratio_back
+      INTEGER N_QT_INTP,N_Y_INTP,N_Q_INTP
+
+      real*8 EPS_EW,TMP_1,yMax
+      integer I_FIRST
+
+      Logical Testing
+      Data Testing / .False. /
+
+C      Testing = .True.
+
+      ggu=4.03192291623900023E-002
+      ggd=5.19761809822488277E-002
+      ggw=0.10660000145435333
+      pi=3.1415926
+      Facu=2.0*pi/3.0*ggu
+      Facd=2.0*pi/3.0*ggd
+CCPY Feb 2020:      Facw=2.0*pi/3.0*ggw
+C For W+ and W- production, the electroweak couplings have been included in both 
+C pert.for and w_asym.for
+C Hence, the corresponding conversion factor is found to be the ratio of 
+C (w_asy)/(Legacy), which gives 
+      Facw=1.00160908D0
+
+      if (iargc().lt.8) then
+        print *
+     >  ,'Purpose: compute a ResBos Y/YK-grid'
+        print *, "=============================="
+        print *,'Usage: get_yk w_pert_file w_asy_file y_nlo_file ',
+     >    'R_Ai y(k)_nnlo_file itype iorder PDF_SET'
+        print *, "-----------------------------"
+        print *
+     >    ,'Inputs: w_pert_file w_asy_file y_nlo_file R_Ai'
+        print *,'Output: y(k)_nnlo_file'
+        print *,'itype=ZU or ZD'
+        print *,'iorder=NLO or NNLO'
+        print *,'input the name of the PDF_SET '
+        print *,'STOP: not enough arguments'
+        STOP
+       endif !iargc
+
+
+      call getarg(1,FILE_w_pert)
+      call getarg(2,FILE_w_asy)
+      call getarg(3,FILE_Y_NLO)      
+      call getarg(4,FILE_R_Ai)      
+      call getarg(5,FILE_Y_K)
+      call getarg(6,itype)
+      call getarg(7,iorder)
+      call getarg(8,PDF_SET)
+
+      OPEN( UNIT=ninp,FILE=FILE_w_pert,FORM='FORMATTED',
+     >      STATUS='OLD')
+      OPEN( UNIT=nina,FILE=FILE_w_asy,FORM='FORMATTED',
+     >      STATUS='OLD')
+      OPEN( UNIT=niny,FILE=FILE_Y_NLO,FORM='FORMATTED',
+     >      STATUS='OLD')
+      OPEN( UNIT=nout,FILE=FILE_Y_K)
+
+      print *,'PERT file: ',FILE_w_pert,'-'
+      print *,'ASY file:  ',FILE_w_asy,'-'
+      print *,'NLO Y file: ',FILE_Y_NLO,'-'
+      print *,'R_Ai file: ',FILE_R_Ai,'-'
+      print *,'NLO+K Y file: ',FILE_Y_K,'-'
+
+CCPY Read in R_Ai file
+          Print*, ' Here: Opening R_Ai grid '
+          jlen=len_trim(FILE_R_AI)
+          print*,' jlen =',jlen
+          jobname=FILE_R_AI(1:jlen)
+          print*,' jlen,jobname =',jlen, jobname
+          IReadIn = 1
+          IYGrid = 2
+          Call CheckSum(jobname)
+          Call PreReadIn(jobname, 2)
+C R_Ai file:  Q,qT,y R_A0 R_A1 R_A2 R_A3
+          Call ReadIn(FILE_R_AI)
+          PRINT*, ' R_Ai grid', FILE_R_AI, ' read in succesfully.'
+
+
+cpn2007 Processing the headers of input files
+      I_DROP_LINES=4
+      EPS=1.E-8
+CCPY Assume 3% luminosity error
+	   EPS_EW=0.03D0
+	   I_FIRST=1
+
+      Do i=1,I_DROP_LINES
+        Read(ninp,'(A)',Err=199,End=199) dummy
+        Read(nina,'(A)',Err=199,End=199) dummy
+      End Do
+
+      I_DROP_LINES=14
+      do line_p=1,i_drop_lines
+        Read(niny,'(A)',Err=199,End=199) dummy
+        write (nout,'(A)') dummy
+      enddo !line_p
+      Read(niny,'(A)',Err=199,End=199) dummy
+      Write(nout,*) ' Generated by get_yk_new.f  AT  ',iorder
+C Add two more comment lines to the new yk grid files. 
+      Write(nout,*) ' Using the PDF_SET = ', PDF_SET
+      Write(nout,'(A)')
+     >'  Q,qT,y, Singular(L0,A3), Pert.(L0,A3), R_A1, R_A2, R_A4, R_A0'
+
+C Processing the numbers       
+       do 
+C  Q,qT,y, pertL0_1, pertA3_1,  pertL0_1+pertL0_2 pertA3_1+pertA3_2 
+           Read(ninp,*,Err=199,End=199) 
+     > x1p,x2p,x3p,p_L01,p_A31,p_L02,p_A32
+C  Q, qT, y, asymL0_1, asymA3_1, asymL0_1+asymL0_2,asymA3_1+asymA3_2
+           Read(nina,*,Err=199,End=199) 
+     > x1a,x2a,x3a,a_L01,a_A31,a_L02,a_A32
+C  Q,qT,y, Singular (L0,A3), Pert. (L0,A3,A1,A2,A4) 
+         Read(niny,*,Err=199,End=199) X1R,X2R,X3R,(y(i), i=1,7)
+C initialization 
+         y(8)=0.d0
+
+         line_p=line_p+1
+ 
+         if (abs(x1p-x1a).gt.eps.or.abs(x2p-x2a).gt.eps
+     >     .or.abs(x3p-x3a).gt.eps.or.
+     >     abs(x1p-X1R).gt.eps.or.abs(x2p-X2R).gt.eps
+     >     .or.abs(x3p-X3R).gt.eps) then
+           print *,'Kinematical parameters do not match at line',line_p
+           print *,'x1p, x2p, x3p =',x1p,x2p,x3p
+           print *,'x1a, x2a, x3a =',x1a,x2a,x3a
+           print *,'X1R, X2R, X3R =',X1R,X2R,X3R
+           STOP
+         endif                  ! abs(x1p-x1a)...
+ 
+         if(itype.eq.'ZU') then
+           convert_0=1.0D0/Facu
+         elseif(itype.eq.'ZD') then
+           convert_0=1.0D0/Facd
+         elseif(itype.eq.'W+' .or. itype.eq.'W-') then
+           convert_0=1.0D0/Facw
+         else
+           Print*,' convert is not assigned to this Boson yet!'
+           stop
+         endif
+         convert=convert_0
+
+         if (iorder=="NLO") then
+           a_L0=y(1)
+           a_A3=y(2)
+           p_L0=y(3)
+           p_A3=y(4)
+         elseif (iorder=="NNLO") then
+CCPY To allow minor changes in the electroweak paraemeters used in the 
+C pert.for, w_asym.f and w_pert.f caculations
+	     IF((I_FIRST.EQ.1).AND.(ABS(x3p).LT.EPS)
+     >        .AND.(DABS(a_L01).GT.EPS))THEN 
+             TMP_1=y(1)/a_L01          
+             IF(ABS(TMP_1/convert_0-1.0).LT.EPS_EW) convert=TMP_1
+             I_FIRST=0
+	       PRINT*,'y(1)/a_L01, convert, convert_0 =', 
+     >       TMP_1, convert, convert_0
+	     ENDIF
+           a_L0=a_L02*convert
+           a_A3=a_A32*convert
+           p_L0=p_L02*convert
+C           IF(P_L01.GT.EPS) THEN 
+C             p_A3=y(4)*(p_L02/p_L01)
+C             ratio_back=p_L02/p_L01
+C           ELSE 
+C             p_A3=y(4)*ratio_back
+C             print*,' P_L01 < eps  and ratio_back=',ratio_back
+C             print*,'x1p,x2p,x3p,p_L01,p_L02=',x1p,x2p,x3p,p_L01,p_L02
+C             call exit
+           ENDIF 
+CCPY force good cancellation 
+           IF(X2R.LT.1D0) THEN
+             p_L0=a_L0
+             p_A3=a_A3
+           ENDIF
+         endif
+
+C Find R_Ai
+         R_A1=1.0D0
+         R_A2=1.0D0
+         R_A4=1.0D0
+         R_A0=1.0D0
+         R_A3=1.0D0
+         if (iorder=="NNLO") then
+C call interpolation
+C R_Ai Grid file:  Q,qT,y R_A0 R_A1 R_A2 R_A3
+C yk Grid file:
+C  Q,qT,y, Singular (L0,A3), Pert. (L0,A3), R_A1, R_A2, R_A4, R_A0  
+          Q_V=X1R
+          QT_V=X2R
+          YB_V=X3R
+
+CCPY THE R_Ai grid file only contains grid points for QT_V > 10 GeV
+          if(QT_V .LT. 10) then
+CCPY ORDER OF POLYNOMIAL (2=linear; 3=parabola) USED IN INTERPOLATION
+            N_Q_INTP=2
+            N_QT_INTP=2
+            N_Y_INTP=2
+CCPY            QT_V_HERE=QT_V
+CCPY R_Ai file is not accurate for QT < 10 GeV; 
+            QT_V_HERE=10.d0
+          ELSE 
+            N_Q_INTP=3
+            N_QT_INTP=3
+            N_Y_INTP=3
+            QT_V_HERE=QT_V
+          ENDIF
+
+CCPY Feb 2021: HARD-WIRED HERE FOR W+ AND W- PRODUCTION, 
+C for USING A DUMMY R_Ai file in which all the entries are 1.
+C These lines should be commented out if a true R_Ai fiel is sued. 
+          IF(itype.eq.'W+' .or. itype.eq.'W-') then
+CCPY ORDER OF POLYNOMIAL (2=linear; 3=parabola) USED IN INTERPOLATION
+            N_Q_INTP=2
+            N_QT_INTP=2
+            N_Y_INTP=2
+          ENDIF
+                 
+C * Take care of yMax
+          Call yMaximum (ECMC, Q_V, QT_V_HERE, yMax)
+C           print*,' ECM, ymax =',ECMC, yMax
+
+          IF(ABS(yB_V).LT.yMax) THEN  
+            Call ThreeRInterp ( N_QT_INTP,N_Y_INTP,N_Q_INTP,
+     >        QT_V_HERE,yB_V,Q_V, SigY, ErrSgY )
+            R_A0 = SigY(3)
+            R_A1 = SigY(0)
+            R_A2 = SigY(1)
+            R_A4 = SigY(2)
+            R_A3 = SigY(4)
+          ELSE
+            R_A0 = 0.D0
+            R_A1 = 0.D0
+            R_A2 = 0.D0
+            R_A4 = 0.D0
+            R_A3 = 0.D0
+          ENDIF
+
+CCPY Feb 2021: HARD-WIRED HERE FOR W+ AND W- PRODUCTION, 
+C for USING A DUMMY R_Ai file in which all the entries are 1.
+C These lines should be commented out if a true R_Ai fiel is sued. 
+C          IF(itype.eq.'W+' .or. itype.eq.'W-') then
+C            R_A0 = 1.D0
+C            R_A1 = 1.D0
+C            R_A2 = 1.D0
+C            R_A4 = 1.D0
+C          ENDIF
+
+          IF (TESTING) THEN 
+            print*,'Q_V,QT_V,yB_V, SigY ',Q_V,QT_V,yB_V, 
+     >      (SigY(I),i=0,3) 
+            print*,' R_A0,R_A1,R_A2,R_A4,R_A3 =',
+     <      R_A0,R_A1,R_A2,R_A4,R_A3
+          ENDIF 
+         endif
+
+         if (abs(y(3)).gt.eps) then
+C R_Ai Grid file:  Q,qT,y R_A0 R_A1 R_A2 R_A3
+C yk Grid file:
+C  Q,qT,y, Singular (L0,A3), Pert. (L0,A3), R_A1, R_A2, R_A4, R_A0  
+           y(5)=R_A1*y(5)/y(3)
+           y(7)=R_A4*y(7)/y(3)
+CCPY Note: y(8) has be placed before y(6)
+           y(8)=R_A0*y(6)/y(3)
+           y(6)=R_A2*y(6)/y(3)
+           y(4)=R_A3*y(4)/y(3)
+
+CJI: Have to do this second because we set y(3) to NNLO here
+           y(1)=a_L0
+           y(2)=a_A3
+           y(3)=p_L0
+         endif
+
+           write(nout,101) X1R, X2R, X3R
+           write(nout,102) (y(i), i=1,4)
+           write(nout,103) (y(i), i=5,8)
+ 101       FORMAT(3(G12.4,2x))
+ 102       FORMAT(4(G14.6,2x))
+ 103       FORMAT(4(G14.6,2x))
+      end do                     !forever
+
+ 199  print *, 'Processed ',line_p,' entries'
+      print *,'Last Q, QT, y values=',X1R,', ',X2R,', ',X3R
+      print *,'Done'
+ 399  close(ninp); close(nina); close(niny); close(nout)
+
+      END                       !program get_yk
+
+
+
+
+CsB * *******************************************************************
+
+      Subroutine ReadIn(Filename)
+C
+C     The following notation apply:
+C     For the CSS (in case of NLO run: Asymptotic) piece
+C     X1A (X2A, X3A) contains the qT (y, Q) vector
+C     iD1+1 (iD2+1, iD3+1) is the number of qT (y, Q) values in the grid
+C     The 1st index of YAS and YAA belong to qT, the 2nd to y, the 3rd to Q.
+C     For the Y piece:
+C     X1R (X2R, X3R) contains the qT (y, Q) vector
+C     iY1+1 (iY2+1, iY3+1) is the number of qT (y, Q) values in the grid
+C     The 1st index of YAR belong to qT, the 2nd to y, the 3rd to Q.
+C
+C     iDD1 (iDD2, iDD3) is the number of qT (y, Q)
+C          values used at the interpolation
+C
+      IMPLICIT DOUBLE PRECISION (A-H,O-Z)
+      Real*8 ECMC
+      Character*78 dummy
+      Character*40 Boson
+      Character*45 Filename
+CsB   The dimensions below give the maximal possible gridsize.
+      Parameter (MD1 = 200, MD2 = 300, MD3 = 100)
+      Dimension X1A(0:MD1), X2A(0:MD2), X3A(0:MD3)
+      Dimension YAS(0:MD1,0:MD2,0:MD3), YAA(0:MD1,0:MD2,0:MD3)
+      Dimension X1R(0:MD1), X2R(0:MD2), X3R(0:MD3)
+      Dimension YAR(0:MD1,0:MD2,0:MD3,0:4)
+      Dimension YDAS(0:MD1,0:MD2,0:MD3), YDAA(0:MD1,0:MD2,0:MD3)
+      Common / Arrays / X1A,X2A,X3A, YAS,YAA,  X1R,X2R,X3R, YAR
+      Common / Dims / iD1,iD2,iD3, iY1,iY2,iY3
+CsB___K-Factor stuff
+      Dimension X1P(0:MD1), X2P(0:MD2), X3P(0:MD3)
+      Dimension YKP(0:MD1,0:MD2,0:MD3)
+      Dimension X1K(0:MD1), X2K(0:MD2), X3K(0:MD3)
+      Dimension YKY(0:MD1,0:MD2,0:MD3)
+      Integer iKFacP,iKFacY,iYGrid
+      Common / KFactor / iKFacP,iKFacY,iYGrid
+      Common / ArraysK / X1P,X2P,X3P,YKP, X1K,X2K,X3K,YKY
+      Common / DimsK / iP1,iP2,iP3, iK1,iK2,iK3
+      Real*8 aKP,aKY
+CsB___
+      Common /ECMC/ ECMC
+      Common / Boson / Boson
+      Integer N_SUD_AB,N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+      Common / Sudakov / N_SUD_AB,N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+!      CHARACTER*10 PDF_EVL_NAME
+!      COMMON/PDFFILE/ PDF_EVL_NAME
+      Common / Process / LTOpt
+CsB NCMx = # of columns in the grid
+      Parameter (NCMx = 20)
+      Dimension A(NCMx)
+      Common / NumCol / NC
+      Common / YPiece / iYPiece, iReadIn
+      REAL*8 QT_V_MIN, QT_V_MAX,YB_V_MAX,Q_V_MIN,Q_V_MAX,QT_V_MXY
+      COMMON/HARDCUT/ QT_V_MIN, QT_V_MAX,YB_V_MAX,
+     >  Q_V_MIN,Q_V_MAX,QT_V_MXY
+      COMMON/AA/W,QCDL,X1X2MIN,NJET,N_PRIMARY_PART,NF,I_STR,IBEAM,NPART,
+     &  NEVENT,NORDER,N_SECOND_PART
+      Common / OneQ / iOneQ
+
+      REAL*8 XMW,XMZ,XMW2,XMZ2,AEM,GAMW,GAMZ,GAMW2,GAMZ2
+     &       SWS,CWS,XMBOT,XMTOP,XMB2,XMT2,GWEAK2
+     &       XMCHARM,XMCHARM2,XMHIGGS,GAMH,GAMH2
+      COMMON/STAND0/XMW,XMZ,XMW2,XMZ2,AEM,GAMW,GAMZ,GAMW2,GAMZ2
+      COMMON/STAND1/SWS,CWS,XMBOT,XMTOP,XMB2,XMT2,GWEAK2
+      COMMON/STAND5/XMCHARM,XMCHARM2,XMHIGGS,GAMH,GAMH2
+      Integer iProc
+      Common / PartonProcess / iProc
+      Integer iResScheme, iLV
+      Real*8 h1v,h1L
+      Common/ ReSumScheme / iResScheme,iLV,h1v,h1L
+      Integer lHead
+      Integer BIPDF,iSet, iNonpert,iFlag_c3,KinCorr
+      Common / BuildInPDF / BIPDF,iSet
+      Real*8 C1,C2,C3,C4
+      Common / LegacyCi / C1,C2,C3,C4
+CCAO! The read W-boson mass and width
+      Real*8 XMW_IN,XMW_GRID,GAMW_IN
+      COMMON/WMASS_IN/XMW_IN,XMW_GRID,GAMW_IN
+      Real*8 XMZ_IN,XMZ_GRID,GAMZ_IN
+      COMMON/ZMASS_IN/XMZ_IN,XMZ_GRID,GAMZ_IN
+
+CCPY
+      LOGICAL Y_ONE_SIDE
+      COMMON/GRID_FILE_FORM/ Y_ONE_SIDE
+
+      Logical Testing
+      Data Testing / .False. /
+
+C      Testing = .True.
+
+      If (Testing) Print*, ' iD1, iD2, iD3 = ', iD1, iD2, iD3
+      If (Testing) Print*, ' iY1, iY2, iY3 = ', iY1, iY2, iY3
+
+ccc      Print*, ' iD1, iD2, iD3 = ', iD1, iD2, iD3
+ccc      Print*, ' iY1, iY2, iY3 = ', iY1, iY2, iY3
+
+CsB___Find out the length of the header
+      lHead = iHeadLen(2,Filename)
+      Print*, ' The length of the header is ',lhead
+      
+CsB___Dump the header
+      If (iReadIn.Eq.0) then ! W,Asy,Prt... pieces
+CsB     Length of old header is 16 lines
+        OPEN(UNIT=2,FILE=Filename,STATUS='OLD') !,ReadOnly)
+C       Read in additional two or three lines for identifying the grid file.
+        Do I = 1, 18
+          Read(2,'(A)',Err=99,End=99) dummy
+          Write(16,'(A)') dummy
+        End Do
+        Write(16,*)
+     >'#############################################################'
+        Close (2)
+
+CsB_____Read the header. Length of new (old=FORTRAN) header is 15 (16) lines.
+        OPEN(UNIT=2,FILE=Filename,STATUS='OLD') !,ReadOnly)
+        Read(2,'(A)',Err=99,End=99) dummy
+        If (lHead.Eq.16) then ! Grid from FORTRAN version of Legacy 
+          Read(2,*) ECMC, iBeam, nDummy, LTOpt, iProc
+          iResScheme = 1 
+          iLV = 1  ! version <= 2.2
+        Else                  ! Grid from C++ version of Legacy 
+          Read(2,*,Err=87,End=87)             ! version > 2.2
+     ,              ECMC, iBeam, LTOpt, iProc, iResScheme, 
+     ,              nDummy, nDummy, nDummy, nDummy
+!       Print*,     ECMC, iBeam, LTOpt, iProc, iResScheme, 
+!    ,              nDummy, nDummy, nDummy, nDummy
+   87     Print*, ' Legacy v2.2 or earlier header '
+CCPY   88     Print*, ' Legacy v2.3 or later header '
+          iResScheme = 1 
+          iLV = 2  
+        End If
+	  Read (2,'(2X,A)',Err=99,End=99) dummy
+          Read (2,*) iSet,iNonpert,iFlag_c3,C1,C2,C3,C4,KinCorr
+!       Print*, iset,inonpert,iflag_c3,C1,C2,C3,C4,KinCorr
+C_______Skip 1 line on old grids
+        Read (2,'(2X,A)',Err=99,End=99) dummy
+C_______Read  MT,MW,MZ,MH,MA
+          Read (2,*) xMTop, xMW_Grid, xMZ_Grid 
+          Read (2,*) xMHiggs,Dummy         
+!       Print*, ' mt,mW,mZ,mH,mA =', xMTop,xMW_Grid,xMZ_Grid,xMHiggs,nDummy
+C_______Read Boson type
+        Read (2,'(12X,A)',Err=99,End=99) Boson
+!       Print*, Boson
+C_______Skip 2 lines
+        Do I = 1, 2
+          Read (2,'(2X,A)',Err=99,End=99) dummy
+        EndDo
+        If (iLv.eq.1) then
+          h1L=0
+          Read (2,'(2X,A)',Err=99,End=99) dummy
+          Read (2,*) nDummy,nDummy,N_SUD_AB,N_WIL_C,I_FSR
+        Else
+          Read (2,*) rDummy,   h1L,rDummy
+          Read (2,'(2X,A)',Err=99,End=99) dummy
+          Read (2,*) nDummy,nDummy,N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+        EndIf
+!       Print*, N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+        If (iLv.eq.1) then
+          nnn = 3
+        Else
+          nnn = 1
+        End If
+        Do I = 1, nnn
+          Read (2,'(2X,A)',Err=99,End=99) dummy
+        End Do
+
+        Print*, ' Input parameters from the grid header:'
+        Print*, '  ECMC = ', ECMC
+        Print*, '  iBeam,nDummy,LTOpt,iProc = ',iBeam,nDummy,LTOpt,iProc
+        Print*, '  iResScheme,h1L = ', iResScheme,h1L
+        Print*, '  iSet,iNonpert,iFlag_c3,KinCorr = ', 
+     ,             iSet,iNonpert,iFlag_c3,KinCorr
+        Print*, '  C1,C2,C3,C4 = ', C1,C2,C3,C4
+        Print*, '  Boson type = ', Boson
+        If (lHead.Eq.15) Print*, '  N_SUD_A,N_SUD_B,N_WIL_C,I_SUD = ', 
+     ,                              N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+        If (lHead.Eq.16) Print*, '  N_SUD_AB,N_WIL_C,I_SUD = ', 
+     ,                              N_SUD_AB,N_WIL_C,I_SUD
+      Else If (iReadIn.Eq.1) then ! Y piece
+        If (iYGrid.Eq.2) then ! R_Ai grid output
+CsB_______Dump the header (3 lines)
+          OPEN( UNIT=2,FILE=Filename,STATUS='OLD') !,ReadOnly)
+          Read(2,'(A)',Err=99,End=99) dummy
+          Read(2,*) ECMC, dummy,dummy
+          Do ii = 1,lHead-2
+            Read(2,'(A)',Err=99,End=99) dummy
+          End Do
+	 Else 
+		  PRINT*, ' THIS iYGRid is not yet implemented.'
+        End If
+      End If
+
+CsB___Read the data
+      If (iReadIn.Eq.0) then !
+        iDD1 = iD1
+        iDD2 = iD2
+        iDD3 = iD3
+      Else
+        iDD1 = iY1
+        iDD2 = iY2
+        iDD3 = iY3
+      End if
+      Print*, ' Reading content of ', Filename
+      Q_V = -10.d0
+      IQ  = -1
+Cdump
+      Print*, ' iDD3+1, iDD2-1, iDD1 ', iDD3+1, iDD2-1, iDD1
+
+      Do 160 K = 1, iDD3+1
+        Do 140 J = 1, iDD2-1
+        Do 140 I = 1, iDD1
+          Read(2,*,ERR=99,End=99) (A(ii), ii=1,NC)
+C          Print*, (A(ii), ii=1,NC)
+
+          If (Q_V.NE.A(1)) then
+            Q_V = A(1)
+            IQ = IQ + 1
+          EndIf
+          If (iReadIn.Eq.0) then ! for other then the Y piece ===============
+            X3A(IQ) = Q_V        ! Print*, Q_V, IQ
+            X1A(I)  = A(2)       ! qT             
+            X2A(J)  = A(3)       ! y              
+            YAS(I,J,IQ) = A(4)   ! CSS L0         
+            YAA(I,J,IQ) = A(5)   ! CSS A3         
+            If (Testing) then
+            If (A(4).lt.0.d0 .or. A(5).lt.0.d0) then
+              Print*, X3A(IQ),X1A(I),X2A(J), YAS(I,J,IQ),YAA(I,J,IQ)
+!              Stop
+            End If
+            End If
+          Else                 ! for reading R_Ai grid file --------------------------------
+C R_Ai grid file:  Q,qT,y R_A0 R_A1 R_A2 R_A3
+            X3R(IQ) = Q_V               ! Print*, Q_V, IQ
+            X1R(I)  = A(2)              ! qT                        
+            X2R(J)  = A(3)              ! y                         
+C yk Grid file:
+C  Q,qT,y, Singular (L0,A3), Pert. (L0,A3), R_A1, R_A2, R_A4, R_A0  
+C R_Ai pieces
+            YAR(I,J,IQ,0) = A(5)        ! R_A1
+            YAR(I,J,IQ,1) = A(6)        ! R_A2
+            YAR(I,J,IQ,2) = A(7)        ! R_A3; which is for A4 (in ResBos code)
+            YAR(I,J,IQ,3) = A(4)        ! R_A0
+            YAR(I,J,IQ,4) = A(8)        ! R_A4; which is for A3 (in ResBos code)
+          End If ! ==========================================================
+
+C      If (Testing) then
+C        If (IQ.Eq.1) then
+C          If (iReadIn.Eq.1) then
+C            Print*, X3R(IQ),X1R(I),X2R(J),
+C     > YAR(I,J,IQ,0),YAR(I,J,IQ,1),YAR(I,J,IQ,2),YAR(I,J,IQ,3)
+C          End If
+C        End If
+C      End If
+
+140   Continue
+
+
+CsB * Xsect(qT=0) = 0 for both resummed and regular (Y) pieces.
+C     For perturbative pieces it does not really matter here.
+        X1A(0) = 0.d0
+        X1R(0) = 0.d0
+        Do jj = 0, iDD2
+          If (iReadIn.Eq.0) then
+            YAS(0,jj,iQ) = 0.0d0
+            YAA(0,jj,iQ) = 0.0d0
+          Else
+CCPY Sept 2009
+            Do ii = 0,4
+              YAR(0,jj,iQ,ii) = 0.0d0
+CCPY              YAR(0,jj,iQ,ii) = YAR(1,jj,iQ,ii)
+            End Do
+          End If
+        End Do
+
+CCPY Sept 2009 Deal with Xsect(y=ymin,ymax) for both resummed and Y pieces
+CCPY: Assuming a large enough y range is covered in the y-grid file.
+        Do 160 jj = 0, iDD1
+          If (iReadIn.Eq.0) then
+            YAS(jj,0,IQ) = YAS(jj,1,IQ)
+            YAA(jj,0,IQ) = YAA(jj,1,IQ)
+            YAS(jj,iD2,iQ) = YAS(jj,iD2-1,iQ)
+            YAA(jj,iD2,iQ) = YAA(jj,iD2-1,iQ)
+          Else
+            Do ii = 0,4
+              YAR(jj,  0,iQ,ii) = YAR(jj,  1,iQ,ii)
+              YAR(jj,iY2,iQ,ii) = YAR(jj,iY2-1,iQ,ii)
+            End Do
+          End If
+
+160   Continue
+      Close(2)
+      If (iYGrid.Eq.2) Close(15)
+
+CCPY Sept 2009: Assuming the y-grid is arranged so that the value 
+C of y increases. This setup is also suitable for the case with 
+C only one-side (in y) grid file.
+      If (iReadIn.Eq.0) then
+        X2A(  0) = X2A(1)- DABS( X2A(2)-X2A(1) )
+        X2A(iD2) = X2A(iD2-1) + DABS( X2A(iD2-1)-X2A(iD2-2) )
+      Else
+        X2R(  0) = X2R(1)- DABS( X2R(2)-X2R(1) )
+        X2R(iY2) = X2R(iY2-1) + DABS( X2R(iY2-1)-X2R(iY2-2) )
+      End If
+
+CsB For the special case when there's only one Q in the grid.
+      If (iDD3.Eq.0) then
+        iOneQ = 1
+C   Pretend that there are 4 Q's, with small separation
+        If (iReadIn.Eq.0) then
+          iD3 = iD3 + 3
+        Else If (iReadIn.Eq.1) then
+          iY3 = iY3 + 3
+        End If
+        iDD3 = iDD3+3
+C        Print*, ' iD3 is increased by ', 3
+        Print*, ' +---------------------------------+ '
+        Print*, ' ! The V width is taken to be ZERO ! '
+        Print*, ' +---------------------------------+ '
+        ep  = .001d0
+        If (iReadIn.Eq.0) then
+          Do ii = 1,3
+            X3A(ii) = X3A(0) + ii*ep
+          End Do
+        Else If (iReadIn.Eq.1) then
+          Do ii = 1,3
+            X3R(ii) = X3R(0) + ii*ep
+          End Do
+        End If
+
+CsB Fill up the ghost arrays, so that they contain the same values as the
+C   single Q array.
+        If (iReadIn.Eq.0) then
+          Do I = 0,iDD1+1
+          Do J = 0,iDD2+1
+          Do K = 1,iDD3+1
+            YAS(I,J,K) = YAS(I,J,0)
+            YAA(I,J,K) = YAA(I,J,0)
+          End Do
+          End Do
+          End Do
+        Else If (iReadIn.Eq.1) then
+          Do I = 0,iDD1+1
+          Do J = 0,iDD2+1
+          Do K = 1,iDD3+1
+            Do ii = 0,4
+              YAR(I,J,K,ii) = YAR(I,J,0,ii)
+            End Do
+          End Do
+          End Do
+          End Do
+        End If
+      End If
+
+CsB Determine QT_V_MIN, QT_V_MAX,YB_V_MAX,Q_V_MIN,Q_V_MAX
+C   from the resummed grid.
+C     X1A (X2A, X3A) contains the qT (y, Q) vector
+C     iD1+1 (iD2+1, iD3+1) is the number of qT (y, Q) values in the grid
+      QT_V_MIN = X1A(0)
+      QT_V_MAX = X1A(iD1)
+      YB_V_MAX = X2A(iD2) - yStep
+      Q_V_MIN  = X3A(0)
+      Q_V_MAX  = X3A(iD3)
+CsB Determine QT_V_MXY
+C   from the Y grid.
+      QT_V_MXY = X1R(iDD1)
+C      Print*, ' Q_V_MIN,Q_V_MAX, QT_V_MIN,QT_V_MIN, QT_V_MAX, YB_V_MAX, QT_V_MXY:'
+C      Print*,   Q_V_MIN,Q_V_MAX, QT_V_MIN,QT_V_MIN, QT_V_MAX, YB_V_MAX, QT_V_MXY
+
+      Return
+
+ 99   Print*, ' Error at reading data in ReadIn. '
+      Print*, ' i = ', i, ', j = ', j, ', k = ', k
+      Print*, ' X1A(i) = ',X1A(i),', X2A(j) =',X2A(j),', Q_V = ',Q_V
+      Stop
+      End ! ReadIn
+
+
+CsB * *******************************************************************
+
+      Subroutine ThreeRInterp ( iDD1,iDD2,iDD3, qT,yIn,Qv,
+     >                          SigY, ErrSgS )
+C
+C     The following notation apply:
+C     X1A (X2A, X3A) contains the qT (y, Q) values
+C     iD1+1 (iD2+1, iD3+1) is the number of qT (y, Q) values in the grid
+C     iDD1 (iDD2, iDD3) is the number of qT (y, Q)
+C          values used at the interpolation
+C     The 1st indices of YAS and YAA belong to qT, the 2nd to y, the 3rd to Q.
+      Implicit Double Precision (A-H,O-Z)
+C     The dimensions below give the maximal possible gridsize.
+      Parameter (MD1 = 200, MD2 = 300, MD3 = 100)
+      Dimension X1A(0:MD1), X2A(0:MD2), X3A(0:MD3)
+      Dimension YAS(0:MD1,0:MD2,0:MD3), YAA(0:MD1,0:MD2,0:MD3)
+      Dimension YDAS(iDD3,iDD1,iDD2), YDAA(iDD3,iDD1,iDD2)
+      Dimension X1R(0:MD1), X2R(0:MD2), X3R(0:MD3)
+      Dimension YAR(0:MD1,0:MD2,0:MD3,0:4)
+      Dimension SigY (0:4)
+      Logical Testing
+      Common /ECMC/ ECM
+      Common / Arrays / X1A,X2A,X3A, YAS,YAA,  X1R,X2R,X3R, YAR
+      Common / Dims / iD1,iD2,iD3, iY1,iY2,iY3
+      Character*40 Boson
+      Common / Boson / Boson
+!      Integer N_SUD_AB,N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+!      Common / Sudakov / N_SUD_AB,N_SUD_A,N_SUD_B,N_WIL_C,I_SUD
+      Common / nyEdge / nyEdge
+      COMMON/HARDCUT/ QT_V_MIN, QT_V_MAX,YB_V_MAX,
+     >  Q_V_MIN,Q_V_MAX,QT_V_MXY
+      Common / Matching / QT_V_MAT
+      COMMON/AA/W,QCDL,X1X2MIN,NJET,N_PRIMARY_PART,NF,I_STR,IBEAM,NPART,
+     &  NEVENT,NORDER,N_SECOND_PART
+
+CCPY
+      LOGICAL Y_ONE_SIDE
+      COMMON/GRID_FILE_FORM/ Y_ONE_SIDE
+
+      Common / TI / nTI
+      Integer iYPSw
+      Common / YPertSwitch / iYPSw
+      Parameter (yMx = 5.d0)
+      Data eps / 1.d-9 /
+      Data Testing /.False./
+
+!      Testing = .True.
+
+      DO I=0,4
+        SigY(I)=0.D0
+      ENDDO
+
+CsB Set flag that tells Polin3 that it was called from ThreeRInterp
+      nTI = 1
+
+CsB * Testing
+      If (Testing) then
+        Print*, ' iY1, iY2, iY3 = ', iY1, iY2, iY3
+        Print*, ' iDD1/2, iDD2/2, iDD3/2 = ', iDD1/2, iDD2/2, iDD3/2
+      EndIf
+
+      y = yIn
+
+CsB * Find out the location of Q, qT, y
+      call LOCATE(X1R, iY1, qT, LqT)
+      call LOCATE(X2R, iY2,  y, Ly)
+      call LOCATE(X3R, iY3, Qv, LQ)
+      If (Testing) THEN 
+        Print *, ' LqT, Ly, LQ = ', LqT, Ly, LQ
+        Print*, ' Q, qT, y = ', Qv,qT,y
+      ENDIF
+CsB * If not on the grid
+      If ( Abs((X1R(iY1)-qT)*(qT-X1R(0))).LT.0.e-9 .or.
+     .     Abs((X2R(iY2)- y)*( y-X2R(0))).LT.0.e-9 .or.
+     .     Abs((X3R(iY3)-Qv)*(Qv-X3R(0))).LT.0.e-9 ) then
+        Print*, ' Warning from 3YInterp: Extrapolation used'
+C        Print*, ' LqT,Ly,LQ = ', LqT,Ly,LQ
+        Print*, ' Q, qT, y = ', Qv,qT,y
+
+      EndIf
+
+CsB * If close to the ends
+CsB   ( This works for even iDD for sure )
+      If (LqT.LT.iDD1/2)     LqT = iDD1/2
+      If (LqT.GT.iY1-iDD1/2) LqT = iY1-iDD1/2+1
+      If ( Ly.LT.iDD2/2)      Ly = iDD2/2
+      If ( Ly.GT.iY2-iDD2/2)  Ly = iY2-iDD2/2+1
+      If ( LQ.LT.iDD3/2)      LQ = iDD3/2
+      If ( LQ.GT.iY3-iDD3/2)  LQ = iY3-iDD3/2+1
+      If (Testing) Print *, ' LqT, Ly, LQ = ', LqT, Ly, LQ
+
+CCPY 
+C R_Ai file:  Q,qT,y R_A0 R_A1 R_A2 R_A3
+	  DO I_AI=0,4 
+CsB A4 piece  --------------------------------------------------------------
+      Do i = 1,iDD1
+        Do j = 1,iDD2
+          Do k = 1,iDD3
+            YDAS(i,k,j) = YAR(LqT-iDD1/2+i-1,Ly-iDD2/2+j-1,
+     >        LQ-iDD3/2+k-1,I_AI)
+            If (Testing) then
+              Print*, ' i,j,k, YDAS(i,k,j) = ',
+     >                  i,j,k, YDAS(i,k,j)
+                  Print*, X3R(LQ-iDD3/2+k-1), X1R(LqT-iDD1/2+i-1),
+     >                X2R(Ly-iDD2/2+j-1), YDAS(i,k,j)
+            EndIf
+          EndDo
+        EndDo
+      EndDo
+
+CsB * Interpolate
+      If (Testing) then
+c        Print*, ' X1R(LqT-iDD1/2), X2R(Ly-iDD2/2), X3R(LQ-iDD3/2) ='
+c        Print*,   X1R(LqT-iDD1/2), X2R(Ly-iDD2/2), X3R(LQ-iDD3/2)
+c          Print*, ' iDD1, iDD2, iDD3 = ', iDD1, iDD2, iDD3
+      EndIf
+      If (nyEdge.Eq.0) then
+CsB * Note: Polin is called this way so that y gets interpolated
+C     first, then Q, and finally qT.
+        Call Polin3 ( X1R(LqT-iDD1/2), X3R(LQ-iDD3/2), X2R(Ly-iDD2/2),
+     >                YDAS, iDD1, iDD3, iDD2, qT, Qv, y, DsigS,DErrSgS )
+CCPY Sept 2009: Remove a few wrong codes below.
+
+      EndIf
+
+      SigY(I_AI) = DSigS
+      If (DErrSgA.GT.ErrSgY) ErrSgY = DErrSgS
+
+      If (Testing) then
+          print*, YAR(LqT, Ly, LQ, :), sigY
+!        Print*, ' I_AI, SigY(I_AI) = ', I_AI, 
+!     > SigY(I_AI), ' +-', ErrSgY
+      EndIf
+
+  	  END DO   ! DO I_AI
+
+      Return
+      End
+
+
+CsB *
+CsB * LOCATE routine, from Numerical Recipes  **************************
+CsB *
+
+      SUBROUTINE LOCATE(XX, N, X, J)
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+      DIMENSION XX(N)
+
+      JL = 0
+      JU = N + 1
+  10      IF (JU - JL.GT.1) THEN
+        JM = (JU + JL)/2
+        IF ((XX(N).GT.XX(1)).EQV.(X.GT.XX(JM))) THEN
+          JL = JM
+        ELSE
+          JU = JM
+        ENDIF
+      GO TO 10
+      ENDIF
+      J = JL
+      RETURN
+      END
+
+CsB * Polin3's **************************************************************
+C ---------------------------------------------------------------------------
+      Subroutine Polin3 (X1A,X2A,X3A,YA,L,M,N,X1,X2,X3,Y,DY)
+C ---------------------------------------------------------------------------
+C * Modified from Polin2 of Numerical recepies by Cs.B. 1/95.
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+      PARAMETER (LMAX=20, MMAX=20, NMAX=20)
+      DIMENSION X1A(L), X2A(M), X3A(N), YA(L,M,N),
+     >          Y1TMP(LMAX), Y2TMP(MMAX), Y3TMP(NMAX)
+      Common / ECMC / ECM
+      COMMON/AA/W,QCDL,X1X2MIN,NJET,N_PRIMARY_PART,NF,I_STR,IBEAM,NPART,
+     &  NEVENT,NORDER,N_SECOND_PART
+      Common / TI / nTI
+      Character*40 Boson
+      Common / Boson / Boson
+
+      Logical Testing
+      Data Testing /.False./
+
+cdump
+C      Testing = .True.
+
+      If(Testing) then
+        Print*,' L,X1A =', L,X1A
+        Print*,' M,X2A =', M,X2A
+        Print*,' N,X3A =', N,X3A
+      endif
+
+      If (.False.) then
+        Print*, ' Input y grid to RatInt: '
+        Print*, X3A
+        Print*, ' Input Q grid to middle interpolation: '
+        Print*, X2A
+        Print*, ' Input QT grid to last interpolation: '
+        Print*, X1A
+        Print*, ' Input Xsect values to RatInt: '
+        Print*, YA
+        Print*, ' Rest of input to Polin3 (...,QT,Q,y): '
+        Print*, L,M,N,X1,X2,X3
+        Stop
+      End If
+
+      DO 12 i1=1,L
+        DO 11 i2=1,M
+          Do 10 i3 = 1,N
+            Y3TMP(i3)=YA(i1,i2,i3)
+C            Print*, i1,i2,i3, YA(i1,i2,i3)
+10        Continue
+C         Print*, ' Input "y" values to RatInt: '
+C         Print*, Y3TMP(1), Y3TMP(2), Y3TMP(3), Y3TMP(4)
+C         Interpolate in y direction using RatInt
+C         Note: Ratint seem to perform better than PolInt,
+C         at the edges. It 'shoots over' less.
+C          Call RatInt(X3A,Y3TMP,N,X3,Y2TMP(i2),DY)
+C         Ratint fails for the pion grids.
+C         This "If" fix is to deal with the flat interpolation case
+C         I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!          If (Y3TMP(1).Eq.Y3TMP(2) .and. Y3TMP(3).Eq.Y3TMP(4) .and.
+!     .        Y3TMP(1).Eq.Y3TMP(3)) then
+!            Y2TMP(i2) = Y3TMP(2)
+!            GoTo 11
+!          Else
+            Call PolInt(X3A,Y3TMP,N,X3,Y2TMP(i2),DY)
+!          End If
+CsB       If PolInt fails, try RatInt.
+          If (Y2TMP(i2).lt.0. .and. Y3TMP(2).GT.0. .and. 
+     .        Y3TMP(3).GT.0.) then
+            If(iBeam.NE.-2 .and. iBeam.NE.0) then
+!           Diagnosis:
+!           Print*, ' Q_T = ', X1A(i1),' Q = ', X2A(i2)
+!           Print*, '-------------'
+!           Print*, ' y = ', X3A
+!           Print*, '-------------'
+!           Print*, Y3TMP
+!           Print*, '-------------'
+!           Print*, X3,Y2TMP(i2)
+!           Stop
+              Call RatInt(X3A,Y3TMP,N,X3,Y2TMP(i2),DY)
+            Else
+c             If ( Y3TMP(1).GT.0. .and. Y3TMP(4).LE.0. ) Y2TMP(i2)=0.d0
+            End If
+          End If
+CsB       Testing the y interpolation
+          If (Testing .and. Y2TMP(i2).lt.0.0) then
+            Print*, ' Input  of y interpolation: ', X3A, Y3TMP
+            Print*, ' Result of y interpolation: ', X3,X2,X1, Y2TMP(i2)
+            Print*, ' Stopped in y interpolation '
+            Stop
+          End If ! End Testing y interpolation
+11      CONTINUE
+cc        Print*, L, M, N, X2A(1), X2A(M), Y2TMP(1), Y2TMP(M)
+C       This "If" fix is to deal with the flat interpolation case
+C       I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!        If (Y2TMP(1).Eq.Y2TMP(2) .and. Y2TMP(3).Eq.Y2TMP(4) .and.
+!     .      Y2TMP(1).Eq.Y2TMP(3)) then
+!          Y1TMP(i1) = Y2TMP(2)
+!          GoTo 12
+!        Else
+          CALL POLINT(X2A,Y2TMP,M,X2,Y1TMP(i1),DY)
+!        End If
+CsB     Testing the middle interpolation
+        If (Testing .and. Y2TMP(i1).lt.0.0) then
+          Print*, ' Input  of mid interp.: ', X2A, Y2TMP
+          Print*, ' Result of mid interp.: ', X3, X2, X1, Y1TMP(i1)
+          Print*, ' Stopped in mid interpolation '
+          Stop
+        End If ! End Testing middle interpolation
+12    CONTINUE
+c     Print*, X1A(1), X1A(L), Y1TMP(1), Y1TMP(L)
+C
+CsB We concluded that the qT interpolation for the low qT portion of the
+C   Asymptotic grid fails in lack of many gridpoints.
+C   On the other hand we know the simple qT shape for the Asymptotic case
+C   to be 1/qT (a[Q,y] Log[Q^2/qT^2] + b[Q,y]).
+C   Here we use this to determine a and b and calculate the cross section
+C   analytically instead of interpolating.
+C
+C      If (.False.) then ! asymptotic case, low pT part, do not call it yet:
+c         have to figure out what to do for high (~20) qT's.
+      If (W.GE.900 .and. nPart.eq.12 .and. nTI.eq.0 .and.
+     .    X1.LT.5.d0 .and. Y1Tmp(3).GT.1.d0) then
+CsB Asymptotic case, low qT part, small qT, large enough cross section
+C   If the warning ' Low precision in the analytical qT shape.'
+C   persists just turn the analytic formula off.
+C   (AnalAsym needs to know Q (X2) to give the cross section at qT.
+C    The y value (X3) just passed to check things whithin.)
+        Call AnalAsym(X1A,Y1TMP,L,X1,X2,X3,Y,DY)
+      Else ! resum, delta sigma, LO cases
+C       This "If" fix is to deal with the flat interpolation case
+C       I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!        If (Y1TMP(1).Eq.Y1TMP(2) .and. Y1TMP(3).Eq.Y1TMP(4) .and.
+!     .      Y1TMP(1).Eq.Y1TMP(3)) then
+!          Y = Y1TMP(2)
+!        Else
+          CALL POLINT(X1A,Y1TMP,L,X1,Y,DY)
+!        End If
+      End If
+
+      RETURN
+      END
+
+CsB -----------------------------------------------------------------------
+      Subroutine Polin3m(X1A,X2A,X3A,YA,L,M,N,X1,X2,X3,Y,DY)
+CsB -----------------------------------------------------------------------
+CsB * Modified from Polin2 of Numerical recepies by C. Balazs at 1/95.
+CsB *
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+      PARAMETER (LMAX=20, MMAX=20, NMAX=20)
+      DIMENSION X1A(L), X2A(M), X3A(N), YA(L,M,N),
+     >          Y1TMP(LMAX), Y2TMP(MMAX), Y3TMP(NMAX)
+      Logical Testing
+      Common / ECMC / ECM
+
+      Testing = .True.
+      Testing = .False.
+            
+CsB * Whether we are at the left or the right part of the y spectrum?
+c      iSgn = Sign(1,X3)
+      iSgn = Int(X3/Abs(X3))
+c      If (Testing) Print*, X3, iSgn
+
+      DO 12 i1=1,L
+        DO 11 i2=1,M
+          Do 10 i3 = 1,N
+            Y3TMP(i3)=YA(i1,i2,i3)
+CsB            If (Testing) Print*, i1,i2,i3, YA(i1,i2,i3)
+10        Continue
+c          Print*, X3A(1), X3A(2), X3A(3), X3A(4),
+c     Print*, Y3TMP(1), Y3TMP(2), Y3TMP(3), Y3TMP(4)
+CsB * Take care of yMax
+          Call yMaximum (ECM, X1A(i1), X2A(i2), yMax)
+          Call Locate (Y3TMP, N, iSgn*yMax, LyM)
+          If (LyM.GT.0 .And. LyM.LT.N) Y3TMP(LyM+(iSgn+1)/2) = yMax
+c
+c          If ( (-yMax.GT.Y3TMP(1) .And. -yMax.LT.Y3TMP(N)) .Or.
+c     >         (-yMax.GT.Y3TMP(1) .And.  yMax.LT.Y3TMP(N))  )   then
+c
+c          EndIf
+CsB * Interpolate in y direction
+C         This "If" fix is to deal with the flat interpolation case
+C         I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!         If (Y3TMP(1).Eq.Y3TMP(2) .and. Y3TMP(3).Eq.Y3TMP(4) .and.
+!    .        Y3TMP(1).Eq.Y3TMP(3)) then
+!           Y2TMP(i2) = Y3TMP(2)
+!           GoTo 11
+!         Else
+            Call Polint(X3A,Y3TMP,N,X3,Y2TMP(i2),DY)
+!         End If
+c          Print*, Y2TMP(i2)
+11      CONTINUE
+c       Print*, L, M, N, X2A(1), X2A(M), Y2TMP(1), Y2TMP(M)
+C       This "If" fix is to deal with the flat interpolation case
+C       I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!       If (Y2TMP(1).Eq.Y2TMP(2) .and. Y2TMP(3).Eq.Y2TMP(4) .and.
+!    .      Y2TMP(1).Eq.Y2TMP(3)) then
+!         Y1TMP(i1) = Y2TMP(2)
+!         GoTo 12
+!       Else
+          CALL POLINT(X2A,Y2TMP,M,X2,Y1TMP(i1),DY)
+!       End If
+12    CONTINUE
+c     Print*, X1A(1), X1A(L), Y1TMP(1), Y1TMP(L)
+C     This "If" fix is to deal with the flat interpolation case
+C     I'm not sure it improves PolInt.  It could be moved into Pol/RatInt
+!     If (Y1TMP(1).Eq.Y1TMP(2) .and. Y1TMP(3).Eq.Y1TMP(4) .and.
+!    .    Y1TMP(1).Eq.Y1TMP(3)) then
+!       Y = Y1TMP(2)
+!     Else
+        CALL POLINT(X1A,Y1TMP,L,X1,Y,DY)
+!     End If
+      RETURN
+      END
+
+C -------------------------------------------------------------------------
+      SUBROUTINE POLINT(XA,YA,N,X,Y,DY)
+C -------------------------------------------------------------------------
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+
+      PARAMETER (NMAX=10)
+      DIMENSION XA(N),YA(N),C(NMAX),D(NMAX)
+
+      If (.True.) then
+!       Print*, XA
+!       Print*, YA
+!       Print*, N,X,Y,DY
+!       Stop
+      EndIf
+
+      NS=1
+      DIF=ABS(X-XA(1))
+      DO 11 I=1,N
+        DIFT=ABS(X-XA(I))
+        IF (DIFT.LT.DIF) THEN
+          NS=I
+          DIF=DIFT
+        ENDIF
+        C(I)=YA(I)
+        D(I)=YA(I)
+11    CONTINUE
+      Y=YA(NS)
+      NS=NS-1
+      DO 13 M=1,N-1
+        DO 12 I=1,N-M
+          HO=XA(I)-X
+          HP=XA(I+M)-X
+          W=C(I+1)-D(I)
+          DEN=HO-HP
+          IF(DEN.EQ.0.) Print*, ' DEN = 0 in Polint. '
+          DEN=W/DEN
+          D(I)=HP*DEN
+          C(I)=HO*DEN
+12      CONTINUE
+        IF (2*NS.LT.N-M)THEN
+          DY=C(NS+1)
+        ELSE
+          DY=D(NS)
+          NS=NS-1
+        ENDIF
+        Y=Y+DY
+13    CONTINUE
+      RETURN
+      END
+
+CsB *** RatInt from Numerical Recepies ******************************
+C -------------------------------------------------------------------------
+      SUBROUTINE RATINT(XA,YA,N,X,Y,DY)
+C -------------------------------------------------------------------------
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+      PARAMETER (NMAX=10,TINY=1.E-25)
+      Common /RatIntErr/ iDD0
+      DIMENSION XA(N),YA(N),C(NMAX),D(NMAX)
+CCAO  
+!     INTEGER*4 IFLAG
+!     COMMON/RET/ IFLAG
+!     IFLAG=0
+      iDD0 = 0
+      NS=1
+      HH=ABS(X-XA(1))
+      DO 11 I=1,N
+        H=ABS(X-XA(I))
+        IF (H.EQ.0.)THEN
+          Y=YA(I)
+          DY=0.0
+          RETURN
+        ELSE IF (H.LT.HH) THEN
+          NS=I
+          HH=H
+        ENDIF
+        C(I)=YA(I)
+        D(I)=YA(I)+TINY
+11    CONTINUE
+      Y=YA(NS)
+      NS=NS-1
+      DO 13 M=1,N-1
+        DO 12 I=1,N-M
+          W=C(I+1)-D(I)
+          H=XA(I+M)-X
+          T=(XA(I)-X)*D(I)/H
+          DD=T-C(I+1)
+CCAO      IF DUE TO NUMERICAL ACCUARACY, DD IS INDEED EQUAL TO 0
+C         THEN SET IFLAG=-997 AND REJECT THIS EVENT
+C         IFLAG IS PASSED THROUGH COMMON BLOCK /RET/
+!         IF(DD.EQ.0) THEN 
+!           IFLAG=-997
+!           GOTO 15
+!         ENDIF
+          IF(DD.EQ.0.) then
+            Print*, ' >>> DD = 0 in RatInt. <<< '
+CsB         I think this happens when an identically 0 input vector is interpolated.
+            iDD0 = 1
+          ENDIF
+          DD=W/DD
+          D(I)=C(I+1)*DD
+          C(I)=T*DD
+12      CONTINUE
+        IF (2*NS.LT.N-M)THEN
+          DY=C(NS+1)
+        ELSE
+          DY=D(NS)
+          NS=NS-1
+        ENDIF
+        Y=Y+DY
+13    CONTINUE
+CCAO  ----------------
+!15   CONTINUE
+      RETURN
+      END ! RatInt
+
+
+C---------------------------------------------------------------------------
+      Subroutine AnalAsym(X1A,Y1TMP,L,X1,X2,X3,Y,DY)
+C---------------------------------------------------------------------------
+      IMPLICIT DOUBLE PRECISION (A-H, O-Z)
+CsB X1A() contains the qT values
+C   Y1TMP() contains the cross section values
+C   L is the dim of X1A (& Y1TMP ?)
+C   X1 is the qT point where we are looking for the cross section
+C   X2 is Q
+C   The interpolated value is returned in Y
+C   Te error of interpolation is returned in DY
+      DIMENSION X1A(L), Y1TMP(L)
+      Common / PrintLevel / lPr
+      Logical Testing
+      Data Testing /.False./
+
+C      Testing = .True.
+      If (Testing) then
+CsB Check the arguments
+        Print*, 'X1A,Y1TMP,L,X1,X2,Y,DY'
+        Print*,  X1A,Y1TMP,L,X1,X2,Y,DY
+      End If
+
+CsB As reference points we choose the first and the third one.
+C   This is because we want to avoid the last, which may be small.
+C   If the last point is < ~1, then the a and b is calculated with
+C   very little precision.
+      qT1 = X1A(1)
+      qT2 = X1A(3)
+      DsDqT1 = Y1TMP(1)
+      DsDqT2 = Y1TMP(3)
+
+CsB Solution of the generic pT shape
+      Q = X2
+      a = (-DsDqT1*qT1 + DsDqT2*qT2)/Log(qT1**2/qT2**2)
+      b = (DsDqT2*qT2*Log(Q**2/qT1**2) - DsDqT1*qT1*Log(Q**2/qT2**2))/
+     /     Log(qT2**2/qT1**2)
+
+CsB First test the formula on a known grid point, on point #2.
+      qT = X1A(2)
+      Y  = 1/qT*(a*Log(Q**2/qT**2) + b)
+      DY = (Y-Y1TMP(2))/Y1TMP(2)
+CsB If the analytic results differs from the grid point more than 0.01%
+C   return zero.
+        ii = ii + 1
+      If (Abs(DY).GT.1e-2 .and. lPr.GE.2) then
+        Write(14,*) ' Low precision in the analytical qT shape. '
+        Write(14,*) ' Inputs: X1A,Y1TMP,L,ii,X1,X2,X3,Y,DY '
+        Write(14,*)   X1A,Y1TMP,L,ii,X1,X2,X3,Y,DY
+        Write(14,*) ' qT, Anal. value, error to grid :'
+        Write(14,*)   qT, Y, DY
+        Return
+C        Stop
+      End If
+
+CsB If the formula works then calculate it for the qT point needed.
+      qT = X1
+      Y  = 1/qT*(a*Log(Q**2/qT**2) + b)
+C      Print*, ' "Interpolated" value: ', Y
+C      Stop
+
+      Return
+      End
+
+CsB * *******************************************************************
+
+      SUBROUTINE YMAXIMUM(ECM,Q_V,QT_V,YMAX)
+      IMPLICIT NONE
+
+      REAL*8 ECM,Q_V,QT_V,YMAX
+      REAL*8 X,ACOSH,T1,T2,T3
+
+      ACOSH(X)=DLOG(X+DSQRT(X**2-1.0))
+
+      T1=ECM**2+Q_V**2
+C      Print*, ' QT_V,Q_V ', QT_V,Q_V
+      T2=DSQRT(QT_V**2+Q_V**2)
+      T3=2.0*ECM*T2
+C      Print*, ' ECM, X**2-1.0 ', ECM, (T1/T3)**2-1.0
+      YMAX=ACOSH(T1/T3)
+
+      RETURN
+      END ! YMAXIMUM
+
+CsB * *******************************************************************
+C
+      Subroutine PreReadIn(Filename, Mode)
+C
+C_____Mode: 1 = main grid
+C           2 = Y piece
+C           3 = K-factor for Pert piece
+C           4 = K-factor for Y piece
+C
+      Implicit Double Precision (A-H,O-Z)
+      Character*45 Filename
+      Common / Dims  / iD1,iD2,iD3, iY1,iY2,iY3
+      Common / DimsK / iP1,iP2,iP3, iK1,iK2,iK3
+      Logical Testing
+      Common / NumCol / NC
+c      Common / YPiece / iYPiece, iReadIn
+
+      Testing = .True.
+C      Testing = .False.
+
+CsB___Find out the length of the header
+      lHead = iHeadLen(2,Filename)
+
+CsB   Sample the file
+CsB   Determine the number of data columns in the file
+      Call Column (2, lHead, Filename, NC)
+C      If (Testing) Print*, 'NC = ', NC
+CsB   Determine the length of the file,
+C     and the number of Q points in the grid.
+C     The maximum length of file is hard-wired here to be 500000 lines.
+      Length = 10000000
+      Call Sample (2, lHead, Filename, 1, Length, NC, NQ)
+C      If (Testing) Print*, ' Length, NQ = ', Length, NQ
+CsB   Determine the number of y and qT points in the grid
+      Length = Length/NQ
+      Call Sample (2, lHead, Filename, 3, Length, NC, Ny)
+C      If (Testing) Print*, ' Length, Ny = ', Length, Ny
+      If (Mode.Eq.1) then
+        iD1 = Length/Ny
+        iD2 = Ny + 1
+        iD3 = NQ - 1
+      Else If (Mode.Eq.2) then
+        iY1 = Length/Ny
+        iY2 = Ny + 1
+        iY3 = NQ - 1
+      Else If (Mode.Eq.3) then
+        iP1 = Length/Ny
+        iP2 = Ny + 1
+        iP3 = NQ - 1
+      Else If (Mode.Eq.4) then
+        iK1 = Length/Ny
+        iK2 = Ny + 1
+        iK3 = NQ - 1
+      End If
+      If (Testing) Print*, ' iD1, iD2, iD3 = ', iD1,iD2,iD3
+      If (Testing) Print*, ' iY1, iY2, iY3 = ', iY1,iY2,iY3
+      If (Testing) Print*, ' iP1, iP2, iP3 = ', iP1,iP2,iP3
+      If (Testing) Print*, ' iK1, iK2, iK3 = ', iK1,iK2,iK3
+
+      Return
+      End
+
+CPN * *******************************************************************
+
+      function iHeadLen(iUnit,FileName)
+CPN Returns the length of the comment header in the file by looking for the
+C   line marking the end of the block. 
+CsB > This is not right anymore: The first 5 symbols in this line must
+C   be #####.
+
+      implicit NONE
+
+      integer iHead,iUnit,iHeadLen
+      character*80 dummy1
+      character*8  dummy2
+      equivalence (dummy1,dummy2)
+
+      character*45 FileName
+
+      iHead=0
+      dummy1=' '
+
+       print*,' filename =',filename
+
+      OPEN(UNIT=iUnit,FILE=Filename,STATUS='OLD')
+
+      do while (.not.(dummy2.eq.'  Q,qT,y'))
+       read (iUnit,'(A)') dummy1
+       Print*, dummy2
+       iHead=iHead+1
+      enddo
+
+      close(iUnit)
+
+      iHeadLen=iHead
+      End! iHeadLen
+
+
+CsB * *******************************************************************
+
+      Subroutine Sample (iUnit,iHead,Filename,iComp,Length,NC, Number)
+
+      Implicit Double Precision (A-H,O-Z)
+      Character*45 Filename
+      Logical Testing
+      Parameter (NCMx = 20)
+      Dimension A(NCMx)
+
+      Testing = .True.
+C      Testing = .False.
+
+      If (Testing) Print*, 'in Sample'
+
+      OPEN(UNIT=iUnit,FILE=Filename,STATUS='OLD') !,ReadOnly)
+CsB   Skip the header
+      Do i = 1, iHead
+        Read(iUnit,'(A)',Err=99,End=99) dummy
+      EndDo
+CsB   Count different A(iComp)'s until Length/EOF
+      D = -100.0
+      Number = 0
+      Do i = 1,Length
+        Read(iUnit,*,ERR=98,End=98) (A(j), j=1,NC)
+        Q = A(1)
+        If (A(iComp).NE.D) then
+           D = A(iComp)
+           Number = Number + 1
+        EndIf
+      EndDo
+CsB   When counting y values (double) check the line after the "last" line
+C     to avoid coincidental agreements in checksum
+      If (iComp.EQ.3) then
+        Read(iUnit,*,ERR=98,End=98) (A(j), j=1,NC)
+        If (A(1).Eq.Q) then
+          Print*, ' File checksum BAD. The grid file is corrupt ! '
+          Stop
+        End If
+      End If
+      Close(iUnit)
+      Return
+
+  98  Continue
+      Length = i - 1
+      Close(iUnit)
+      If (Testing) Print*, Length, Number
+      Return
+
+  99  Print*, ' Error at reading the header of the data. '
+      Stop
+      End
+
+CsB * *******************************************************************
+
+      Subroutine Column (iUnit, iHead, Filename, NC)
+      Implicit Double Precision (A-H,O-Z)
+      Character*45 Filename
+      Logical Testing
+      Parameter (NCMx = 20)
+      Dimension A(NCMx)
+      Common / YPiece / iYPiece, iReadIn
+
+      Testing = .True.
+C      Testing = .False.
+
+      If (Testing) Print*, ' in Column '
+C      If (iReadIn.Eq.0) Print*, ' Opening low  qT grid... '
+C      If (iReadIn.Eq.1) Print*, ' Opening Y piece grid... '
+      OPEN(UNIT=iUnit,FILE=Filename,STATUS='OLD') !,ReadOnly)
+CsB   Skip the header
+      Do i = 1, iHead
+c        Read(2,'(A)',Err=99,End=99) dummy
+        Read(iUnit,'(A)',Err=99,End=99) dummy
+      EndDo
+CsB   Count different entries
+c      Read(2,*,ERR=98,End=98) (A(i), i = 1,NCMx)
+      Read(iUnit,*,ERR=98,End=98) (A(i), i = 1,NCMx)
+      Do i = 2,NCMx
+        If (A(i) .eq. A(1)) then
+          NC = i - 1
+          Close(iUnit)
+          Return
+        End if
+      End Do
+CsB   If same entry was not found in NCMx steps.
+      Print*, ' Error finding same Q. '
+      Stop
+
+  99  Print*, ' Error at reading the header of datafile. '
+  98  Print*, ' Error at reading datafile. '
+      Stop
+      End
+
+CsB -------------------------------------------------------------------------
+      Subroutine CheckSum (Filename)
+CsB -------------------------------------------------------------------------
+
+      Implicit Double Precision (A-H,O-Z)
+      Character*45 Filename
+
+      Print*, ' Checking consistency of ', Filename
+
+CsB___Find out the length of the header
+!      Print*, ' Finding length of header of ', Filename
+      lHead = iHeadLen(2,Filename)
+      Print*, ' Length of header  = ', lHead
+
+CsB___Determine the number of data columns in the file
+      Call Column (2, lHead, Filename, NC)
+!      Print*, ' # of columns = ', NC
+
+CsB___Determine the length of the file, and the number of Q points in the grid.
+C     The maximum length of file is hard-wired here to be 500000 lines.
+      Length = 10000000
+      Call Sample (2, lHead, Filename, 1, Length, NC, NQ)
+      LengthFile = Length
+!      Print*, ' # of  Q points = ', NQ
+
+CsB___Determine the number of y points in the grid
+      Length = Length/NQ
+      Call Sample (2, lHead, Filename, 3, Length, NC, Ny)
+!      Print*, ' # of  y points = ', Ny
+
+CsB___Determine the number of qT points in the grid
+      Length = Length/Ny
+      Call Sample (2, lHead, Filename, 2, Length, NC, NqT)
+!      Print*, ' # of qT points = ', NqT
+!      Print*, ' Length of file, NQ*Ny*NqT =', LengthFile, NQ*Ny*NqT
+      If (LengthFile.Eq.NQ*Ny*NqT) then
+        Print*, ' File checksum OK '
+      Else
+        Print*, ' File checksum BAD. The grid file is corrupt! '
+        Stop
+      EndIf
+CCPY      If (NQ.GT.50 .or. Ny.GT.75 .or. NqT.GT.150) then
+CZL      If (NQ.GT.50 .or. Ny.GT.85 .or. NqT.GT.150) then
+c htj    If (NQ.GT.50 .or. Ny.GT.100 .or. NqT.GT.200) then
+      If (NQ.GT.100 .or. Ny.GT.500 .or. NqT.GT.200) then
+c        print*,"NQ=",NQ,"Ny=",NY,"Nqt=",Nqt
+        Print*, ' Grid file too large.  See comments in the code.'
+CsB     These dimensions are limited to 200, 100 and 50.  
+C       To change search for (in both resbos.f and resbosm.f):
+C "C      The dimensions below give the maximal possible gridsize"
+C "        Parameter (MD1 = 200, MD2 = 100, MD3 = 50)"
+
+        Stop
+      EndIf
+
+      Return
+      End ! CheckSum
+
+
+CsB ------------------------------------------------------------------------
+      Subroutine ExitGracefully
+CsB ------------------------------------------------------------------------
+      Print*, ' Stopped in Exit'
+      Stop
+      End
+
+
+
