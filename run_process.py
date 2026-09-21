@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-resbos_campaign.py -- copy a template ResBos-Legacy folder to a new place, put the
+run_process.py -- copy a template ResBos-Legacy folder to a new place, put the
 right energy / PDF / boson in every .in file, and chain the jobs with shards.
 
-    python3 resbos_campaign.py campaign.ini            # prepare <dest>, write <dest>/submit_all.sh
-    python3 resbos_campaign.py campaign.ini --submit   # ... and run it (on the HPCC login node)
+    python3 run_process.py 7TeV_WpWm_example.ini            # prepare <dest>, write <dest>/submit_all.sh
+    python3 run_process.py 7TeV_WpWm_example.ini --submit   # ... and run it (on the HPCC login node)
 
 The .ini names a SOURCE folder that holds get_yk_new/ legacy/ resbos/ w_asym/ w_pert/
 (e.g. templates/7TeV_WpWm) and a DEST folder.  Only what a run needs is copied to
 DEST: the executables (from the source, or from [executables] in the .ini, e.g. the
-ones built by build_executables.py), the grids (./inp/*.inp) and make_dummy_rai.py.  The source
+ones built by setup_resbos_legacy.sb), the grids (./inp/*.inp) and make_dummy_rai.py.  The source
 does NOT need the outputs of earlier steps: get_yk_new needs the w_pert / w_asym /
 legacy outputs and resbos needs the legacy and Yk grids, so each of those jobs
 brings its inputs next to itself (symlink or copy) when it starts, once the upstream
@@ -204,7 +204,7 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts):
     write(os.path.join(d, "merge_shards.py"), ms, exe=True)
     write(os.path.join(d, f"run_{label}_array.sb"), conv(read("run_w_asym_array.sb")), exe=True)
     # after merging, verify the row count (legacy Y-piece files have 3 lines per point, the rest 1)
-    check = (f'\n# row-count check added by resbos_campaign.py\n'
+    check = (f'\n# row-count check added by run_process.py\n'
              f'case "$JOBNAME" in *_legacy_*_Y) K=3;; *) K=1;; esac\n'
              f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts} || exit 1\n')
     write(os.path.join(d, f"merge_{label}_array.sb"), conv(read("merge_w_asym_array.sb")) + check, exe=True)
@@ -484,7 +484,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "_check":
         return cmd_check(*sys.argv[2:5])
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("campaign", help="campaign .ini (see campaign_example.ini)")
+    ap.add_argument("campaign", help="campaign .ini (see 7TeV_WpWm_example.ini)")
     ap.add_argument("--submit", action="store_true", help="run submit_all.sh after preparing dest")
     ap.add_argument("--reuse", action="store_true", help="dest already exists: refresh .in files and scripts")
     args = ap.parse_args()
