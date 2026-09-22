@@ -191,7 +191,9 @@ python3 run_process.py 7TeV_WpWm_example.ini --reuse --submit     # on the HPCC 
 bash run_7TeV_WpWm/submit_all.sh
 ```
 
-(`--submit` on a fresh `dest` works without `--reuse`; use `--reuse` when the folder already exists.)
+(`--submit` on a fresh `dest` works without `--reuse`; use `--reuse` when the folder already exists. `--clean-shards`,
+`--reuse` and `--submit` are independent flags and combine freely, e.g. `--clean-shards --submit` to prepare, submit
+and have the shards cleaned up as each merge job finishes.)
 
 `submit_all.sh` submits, for each boson, the chain below with `--dependency=afterok`, so every step starts only when
 the previous ones finished successfully:
