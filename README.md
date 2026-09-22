@@ -218,7 +218,42 @@ Logs are `slurm_*.out/.err` inside each code's folder (shard logs are in `<job>_
 For reference, a full-size run takes about 3 h (`w_pert`) and about 16 h serial for Legacy (divided by the number of
 shards); `resbos` takes minutes for tens of millions of events.
 
-### 3.5 Change the setup and run again
+### 3.5 Add a resbos run (e.g. a different set of cuts) without recomputing everything
+
+`w_pert`, `w_asym`, Legacy and `get_yk_new` do not depend on `[resbos]` / `[cuts.<name>]` at all, so the best way to
+get several cut sets is to list them all in `[resbos] runs` **before** the first `python3 run_process.py ... --submit`
+(section 3.1) — they share the same upstream jobs, run in the same submission, and cost nothing extra upstream:
+
+```ini
+[resbos]
+runs = atlas, nocuts        # one resbos job per name, both depending on the same Yk grid / Legacy main grid
+```
+
+If you only realize you need another cut set **after** a campaign has already finished (`legacy/*_main.out` and
+`get_yk_new/*.out` already exist in `dest/`), don't rerun `run_process.py` normally — `submit_all.sh` always
+resubmits the whole chain, wasting the ~16 h of Legacy and ~3 h of `w_pert`. Instead add the new run to the `.ini`
+and use `--resbos-only`, which only (re)writes and submits the `resbos` job(s), reusing the existing upstream outputs
+directly (no dependency wait, since they are already there):
+
+```ini
+[resbos]
+runs = nocuts                     # add the new run (drop or keep 'atlas'; already-existing resbos/*.in are just rewritten)
+
+[cuts.nocuts]
+lepton = 0.0, -10, 0.0, 10000.0, 99.0
+mt_met = 0.0, 10000., 0.0
+```
+
+```bash
+python3 run_process.py 7TeV_WpWm_example.ini --resbos-only --submit
+```
+
+It re-copies the current `resbos_root` from `bin/` (so a rebuilt `resbos` is picked up too), checks that
+`legacy/<...>_main.out` and `get_yk_new/<...>.out` already exist for each process in `[campaign] processes` (and
+stops with a clear error if not — run the full campaign first), then writes and submits only the new `resbos/*.in` +
+`run_*.sb`. Without `--submit` it just prepares them and prints the `sbatch` command to run manually.
+
+### 3.6 Change the setup and run again
 
 Copy the `.ini`, edit it and run the driver with the new file. For example to change the energy, PDF, order or the
 resbos cuts edit `ecm`, `pdf`, `order` or the `[resbos]` / `[cuts.<name>]` sections, and use a different `dest`

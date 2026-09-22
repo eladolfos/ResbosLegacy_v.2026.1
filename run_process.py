@@ -289,6 +289,79 @@ exit $EXIT_CODE
 """
 
 
+def write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines):
+    """Write resbos/<name>_<tag>_<run>.in + its .sb from the resbos template + [cuts.<run>]; return the job name."""
+    sec = "cuts." + run
+    if run != "default" and not cfg.cp.has_section(sec):
+        die(f"[resbos] runs lists '{run}' but there is no [{sec}] section")
+    lines = list(resbos_lines)
+    # ISEED and the VEGAS settings: only what the .ini overrides
+    i = find(lines, "seed for random", "seed")
+    toks = [t.strip() for t in lines[i].split(">", 1)[0].split(",")]
+    if cfg.get("resbos", "vegas"):
+        toks[:5] = [t.strip() for t in cfg.req("resbos", "vegas").split(",")]
+    if cfg.get("resbos", "seed"):
+        toks[5] = cfg.req("resbos", "seed")
+    put(lines, i, ",".join(toks))
+    put(lines, find(lines, "Main data grid", "main grid"), f'./Resbos_grids/{main_job}.out')
+    put(lines, find(lines, "Y piece grid", "Y grid"), f"./Resbos_grids/{yk_job}.out")
+    for key, marker in (("lepton", "Cuts(1)"), ("mass_qt_y", "Cuts(2)"), ("mt_met", "Cuts(3)")):
+        v = cfg.get(sec, key)
+        if v:
+            if "{qwindow}" in v:
+                v = v.replace("{qwindow}", cfg.req("resbos", "qwindow"))
+            put(lines, find(lines, marker, key), v)
+    if cfg.get("resbos", "lumi"):
+        set_token(lines, find(lines, "Luminosity", "luminosity"), 0, cfg.req("resbos", "lumi"))
+    if cfg.get("resbos", "output"):
+        put(lines, find(lines, "Output fromat", "output"), cfg.req("resbos", "output"))
+    rjob = f"{cfg.name}_{tag}_{run}"
+    write(os.path.join(rdir, rjob + ".in"), "".join(lines))
+    write(os.path.join(rdir, f"run_{rjob}.sb"), resbos_script(cfg, rjob, main_job, yk_job), exe=True)
+    return rjob
+
+
+def resbos_add(cfg, args):
+    """--resbos-only: dest already has the w_pert/w_asym/legacy/get_yk_new outputs of an earlier run;
+    only (re)generate and optionally submit the resbos job(s) for [resbos] runs, reusing them directly."""
+    if not os.path.isdir(cfg.dest):
+        die(f"{cfg.dest} does not exist: run the full campaign first (no --resbos-only)")
+    resbos_lines = read_lines(os.path.join(cfg.src, cfg.req("templates", "resbos")))
+    rdir = os.path.join(cfg.dest, "resbos")
+    os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+    exe_src = cfg.exe_src("resbos", "resbos_root")
+    if not os.path.isfile(exe_src):
+        die(f"executable not found: {exe_src}\n       build it first with:  sbatch setup_resbos_legacy.sb")
+    copy(exe_src, os.path.join(rdir, "resbos_root"), exe=True)
+    runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+    to_submit = []
+    for vtype in cfg.procs:
+        tag, _ = PROCS[vtype]
+        main_job = f"{cfg.name}_legacy_{tag}_main"
+        yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
+        main_out = os.path.join(cfg.dest, "legacy", main_job + ".out")
+        yk_out = os.path.join(cfg.dest, "get_yk_new", yk_job + ".out")
+        missing = [p for p in (main_out, yk_out) if not os.path.isfile(p)]
+        if missing:
+            die("missing output(s) of the main campaign, run (and wait for) it first:\n       "
+                + "\n       ".join(missing))
+        print(f"\n== {vtype}")
+        for run in runs:
+            rjob = write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines)
+            print(f"  resbos       {rjob}.in")
+            to_submit.append((rdir, f"run_{rjob}.sb", rjob))
+    if args.submit:
+        if not shutil.which("sbatch"):
+            die("sbatch not found: use --submit on the HPCC login node")
+        for d, script, rjob in to_submit:
+            out = subprocess.check_output(["sbatch", "--parsable", script], cwd=d, text=True).strip()
+            print(f"submitted {rjob}: job {out}")
+    else:
+        print("\nnext:")
+        for d, script, _ in to_submit:
+            print(f'  (cd "{d}" && sbatch {script})')
+
+
 # ------------------------------------------------------------------ main flow
 def build(cfg, args):
     for d in ("get_yk_new", "legacy", "resbos", "w_asym", "w_pert"):
@@ -421,33 +494,7 @@ def build(cfg, args):
         os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
         runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
         for run in runs:
-            sec = "cuts." + run
-            if run != "default" and not cfg.cp.has_section(sec):
-                die(f"[resbos] runs lists '{run}' but there is no [{sec}] section")
-            lines = list(tlines["resbos"])
-            # ISEED and the VEGAS settings: only what the .ini overrides
-            i = find(lines, "seed for random", "seed")
-            toks = [t.strip() for t in lines[i].split(">", 1)[0].split(",")]
-            if cfg.get("resbos", "vegas"):
-                toks[:5] = [t.strip() for t in cfg.req("resbos", "vegas").split(",")]
-            if cfg.get("resbos", "seed"):
-                toks[5] = cfg.req("resbos", "seed")
-            put(lines, i, ",".join(toks))
-            put(lines, find(lines, "Main data grid", "main grid"), f'./Resbos_grids/{jobs["legacy_main"]}.out')
-            put(lines, find(lines, "Y piece grid", "Y grid"), f"./Resbos_grids/{yk_job}.out")
-            for key, marker in (("lepton", "Cuts(1)"), ("mass_qt_y", "Cuts(2)"), ("mt_met", "Cuts(3)")):
-                v = cfg.get(sec, key)
-                if v:
-                    if "{qwindow}" in v:
-                        v = v.replace("{qwindow}", cfg.req("resbos", "qwindow"))
-                    put(lines, find(lines, marker, key), v)
-            if cfg.get("resbos", "lumi"):
-                set_token(lines, find(lines, "Luminosity", "luminosity"), 0, cfg.req("resbos", "lumi"))
-            if cfg.get("resbos", "output"):
-                put(lines, find(lines, "Output fromat", "output"), cfg.req("resbos", "output"))
-            rjob = f"{cfg.name}_{tag}_{run}"
-            write(os.path.join(rdir, rjob + ".in"), "".join(lines))
-            write(os.path.join(rdir, f"run_{rjob}.sb"), resbos_script(cfg, rjob, jobs["legacy_main"], yk_job), exe=True)
+            rjob = write_resbos_run(cfg, rdir, tag, run, jobs["legacy_main"], yk_job, tlines["resbos"])
             sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:${merge_ids["legacy_main"]} '
                        f'--kill-on-invalid-dep=yes run_{rjob}.sb)')
             print(f"  resbos       {rjob}.in")
@@ -497,8 +544,12 @@ def main():
     ap.add_argument("campaign", help="campaign .ini (see 7TeV_WpWm_example.ini)")
     ap.add_argument("--submit", action="store_true", help="run submit_all.sh after preparing dest")
     ap.add_argument("--reuse", action="store_true", help="dest already exists: refresh .in files and scripts")
+    ap.add_argument("--resbos-only", action="store_true",
+                    help="dest already has finished w_pert/w_asym/legacy/get_yk_new outputs: only (re)generate "
+                         "and, with --submit, run the resbos job(s) of [resbos] runs, reusing those outputs directly")
     args = ap.parse_args()
-    build(Cfg(args.campaign), args)
+    cfg = Cfg(args.campaign)
+    (resbos_add if args.resbos_only else build)(cfg, args)
 
 
 if __name__ == "__main__":
