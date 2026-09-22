@@ -182,7 +182,7 @@ class Cfg:
 
 
 # ------------------------------------------------------------------ pieces
-def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts):
+def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean_shards):
     """Copy shrds_scripts/ into dest/<folder>, renaming w_asym -> label (exe for the srun line)."""
     d = os.path.join(cfg.dest, folder)
     sd = cfg.shard_scripts
@@ -208,6 +208,10 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts):
     check = (f'\n# row-count check added by run_process.py\n'
              f'case "$JOBNAME" in *_legacy_*_Y) K=3;; *) K=1;; esac\n'
              f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts} || exit 1\n')
+    if clean_shards:
+        # only reached if the check above passed (it exits 1 otherwise): the shards are kept for debugging on failure
+        check += (f'echo "--clean-shards: removing ${{JOBNAME}}_shards/ (merged output verified above)"\n'
+                  f'rm -rf "${{JOBNAME}}_shards"\n')
     write(os.path.join(d, f"merge_{label}_array.sb"), conv(read("merge_w_asym_array.sb")) + check, exe=True)
     write(os.path.join(d, f"submit_{label}_array.sh"), conv(read("submit_w_asym_array.sb")), exe=True)
 
@@ -421,7 +425,7 @@ def build(cfg, args):
         copy(os.path.join(cfg.src, "get_yk_new", "make_dummy_rai.py"),
              os.path.join(cfg.dest, "get_yk_new", "make_dummy_rai.py"))
     for folder, exe, label, hdr in {(f, e, l, h) for f, e, l, h, _ in STAGES.values()}:
-        instantiate_shard_scripts(cfg, folder, label, exe, hdr, npts)
+        instantiate_shard_scripts(cfg, folder, label, exe, hdr, npts, args.clean_shards)
 
     # ---- per boson: .in files + submit lines
     sub = ["#!/bin/bash", "set -e",
@@ -547,6 +551,9 @@ def main():
     ap.add_argument("--resbos-only", action="store_true",
                     help="dest already has finished w_pert/w_asym/legacy/get_yk_new outputs: only (re)generate "
                          "and, with --submit, run the resbos job(s) of [resbos] runs, reusing those outputs directly")
+    ap.add_argument("--clean-shards", action="store_true",
+                    help="w_pert/w_asym/legacy: delete each stage's <job>_shards/ folder from inside its merge job, "
+                         "right after the row-count check passes (saves disk; kept on failure for debugging)")
     args = ap.parse_args()
     cfg = Cfg(args.campaign)
     (resbos_add if args.resbos_only else build)(cfg, args)

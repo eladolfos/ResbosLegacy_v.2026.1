@@ -174,6 +174,15 @@ from where, the grid size, and the list of jobs per boson. Nothing is submitted 
 files first. The `.in` files are generated from the W+ templates: only ECM, `lha_<pdf>`, `Type_V`/`JWTYPE`, the
 active range and the options set in the `.ini` are changed.
 
+Add `--clean-shards` to have each `w_pert`/`w_asym`/legacy merge job delete its own `<job>_shards/` folder (the
+per-shard `.in`/`.out`/logs; several GB for the full grid) right after the merge's row-count check passes, freeing
+the space as soon as the merged `.out` is verified good. If the check fails the shards are kept, so you can inspect
+the bad shard. Without the flag the shards are kept in every case.
+
+```bash
+python3 run_process.py 7TeV_WpWm_example.ini --clean-shards
+```
+
 ### 3.3 Submit
 
 ```bash
