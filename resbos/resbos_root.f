@@ -759,6 +759,10 @@ C -------------------------------------------------------------------------
       SUBROUTINE YUAN_MAIN
 C -------------------------------------------------------------------------
       IMPLICIT NONE
+C     I_GTMARK: strips the trailing "> comment" off a filename read with
+C     '(A)' (whole-line, unlike the rest of this codebase's list-directed
+C     reads, which stop at the first blank on their own)
+      INTEGER*4 I_GTMARK
 
       REAL*8 W,QCDL,X1X2MIN
       INTEGER*4 NJET,N_PRIMARY_PART,NF,I_STR,NPART,NEVENT,NORDER,iBeam,
@@ -952,6 +956,8 @@ CsB___INITILIZE ALL THE VARIABLES
 
 CsB___Read the name of the Input data grid(s)
       Read(5,'(A)') Filename
+      I_GTMARK = INDEX(Filename, '>')
+      IF (I_GTMARK.GT.0) Filename = Filename(1:I_GTMARK-1)
       If (Filename.Eq.'AA' .Or. Filename.Eq.'AG' .Or.
      .    Filename.Eq.'ZZ' .Or. Filename.Eq.'H0') then
 CsB_____This is the case when we use the built in matrix elements.
@@ -967,6 +973,8 @@ C        Print*, ' Ecm, iBeam =', W, iBeam
       End If
 
       Read(5,'(A)') YFilename
+      I_GTMARK = INDEX(YFilename, '>')
+      IF (I_GTMARK.GT.0) YFilename = YFilename(1:I_GTMARK-1)
       If (YFilename.Eq.'-') then
         iYPiece = 0
         Print*, ' +---------------------------------------+ '
@@ -1080,14 +1088,20 @@ C___________If O(a_s^2) K factors wanted for the L0 Pert(1) piece:
      .          Boson.Eq.'HP') then
 C              KPFileName = 'wp_prk_ct4m.dat'
                READ(5,'(A)') KPFileName
+               I_GTMARK = INDEX(KPFileName, '>')
+               IF (I_GTMARK.GT.0) KPFileName = KPFileName(1:I_GTMARK-1)
             Else If (Boson.Eq.'Z0' .or. Boson.Eq.'HZ' ) then
 ccpy              KPFileName = 'z0_pk_ct61m.dat'
 C              KPFileName = 'pert_kf_z0_tev2_ct61m_kin.dat'
                READ(5,'(A)') KPFileName
+               I_GTMARK = INDEX(KPFileName, '>')
+               IF (I_GTMARK.GT.0) KPFileName = KPFileName(1:I_GTMARK-1)
             Else If (Boson.Eq.'H0') then
 C              KPFileName = './grids/h0_prk_ct66m.dat'
 C              KPFileName = 'h0_prk_ct66m.dat'
                READ(5,'(A)') KPFileName
+               I_GTMARK = INDEX(KPFileName, '>')
+               IF (I_GTMARK.GT.0) KPFileName = KPFileName(1:I_GTMARK-1)
             Else
               Print*, ' K-factor grid is not available for Pert piece. '
               iKFacP = 0
@@ -1118,13 +1132,19 @@ C___________If O(a_s^2) K factor wanted for Y(1) piece:
      .          Boson.Eq.'HP') then
 C              KYFileName = 'wp_yk_ct4m.dat'
                READ(5,'(A)') KYFileName
+               I_GTMARK = INDEX(KYFileName, '>')
+               IF (I_GTMARK.GT.0) KYFileName = KYFileName(1:I_GTMARK-1)
             Else If (Boson.Eq.'Z0' .or. Boson.Eq.'HZ' ) then
 C              KYFileName = 'z0_yk_ct61m.dat'
                READ(5,'(A)') KYFileName
+               I_GTMARK = INDEX(KYFileName, '>')
+               IF (I_GTMARK.GT.0) KYFileName = KYFileName(1:I_GTMARK-1)
             Else If (Boson.Eq.'H0') then
 C              KYFileName = './grids/h0_yk_ct66m.dat'
 C              KYFileName = 'h0_yk_ct66m.dat'
                READ(5,'(A)') KYFileName
+               I_GTMARK = INDEX(KYFileName, '>')
+               IF (I_GTMARK.GT.0) KYFileName = KYFileName(1:I_GTMARK-1)
             Else
               Print*, ' K-factor grid is not available for Y piece. '
               iKFacY = 0
