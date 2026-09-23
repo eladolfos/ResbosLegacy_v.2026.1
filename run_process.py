@@ -291,9 +291,13 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean
     write(os.path.join(d, "merge_shards.py"), ms, exe=True)
     write(os.path.join(d, f"run_{label}_array.sb"), conv(read("run_w_asym_array.sb")), exe=True)
     # after merging, verify the row count (legacy Y-piece files have 3 lines per point, the rest 1)
-    check = (f'\n# row-count check added by run_process.py\n'
+    check = (f'\n# row-count check + timing log added by run_process.py\n'
              f'case "$JOBNAME" in *_legacy_*_Y) K=3;; *) K=1;; esac\n'
-             f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts} || exit 1\n')
+             f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts}\n'
+             f'CHECK_EXIT=$?\n'
+             f'{timing_fn(cfg)}'
+             f'log_elapsed "{label} merge ($JOBNAME, exit=$CHECK_EXIT)"\n'
+             f'[ $CHECK_EXIT -eq 0 ] || exit 1\n')
     if clean_shards:
         # only reached if the check above passed (it exits 1 otherwise): the shards are kept for debugging on failure
         check += (f'echo "--clean-shards: removing ${{JOBNAME}}_shards/ (merged output verified above)"\n'
@@ -326,6 +330,32 @@ def stage_fn(cfg):
             '}\n')
 
 
+def timing_header_lines(cfg):
+    """submit_all.sh: write dest/timing.log's first line (T0, the campaign's own start time,
+    as an epoch timestamp) so every later stage's log_elapsed() can report elapsed-since-start."""
+    log = os.path.join(cfg.dest, "timing.log")
+    return [f'TIMING_LOG="{log}"',
+            'echo "T0 $(date +%s)  ($(date \'+%F %T\'), campaign start)" > "$TIMING_LOG"', '']
+
+
+def timing_fn(cfg):
+    """Bash function `log_elapsed STAGE`: append a locked, timestamped line to dest/timing.log
+    with the wall-clock time elapsed since the campaign started (submit_all.sh's T0 line)."""
+    log = os.path.join(cfg.dest, "timing.log")
+    return (f'TIMING_LOG="{log}"\n'
+            'log_elapsed() {   # log_elapsed STAGE\n'
+            '  local t0 now elapsed\n'
+            '  t0=$(awk \'/^T0 /{print $2; exit}\' "$TIMING_LOG" 2>/dev/null)\n'
+            '  now=$(date +%s)\n'
+            '  elapsed=$([ -n "$t0" ] && echo $((now - t0)) || echo -1)\n'
+            '  { flock -x 201\n'
+            '    printf \'%s  %-40s  elapsed_since_start=%ss (%dh%02dm%02ds)\\n\' \\\n'
+            '      "$(date \'+%F %T\')" "$1" "$elapsed" $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) \\\n'
+            '      >> "$TIMING_LOG"\n'
+            '  } 201>>"$TIMING_LOG.lock"\n'
+            '}\n')
+
+
 def yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai):
     job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
     ins = [(f'../{folder}/{jobs[stage]}.out', f'{jobs[stage]}.out')
@@ -348,6 +378,8 @@ cd ${{SLURM_SUBMIT_DIR}}
 EXIT_CODE=$?
 echo "get_yk_new finished with exit code $EXIT_CODE"
 [ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {job}.out 3 {npts} || EXIT_CODE=1
+{timing_fn(cfg)}
+log_elapsed "get_yk_new ({tag}, exit=$EXIT_CODE)"
 exit $EXIT_CODE
 """
     return job, body
@@ -375,6 +407,14 @@ LOG_FILE="resbos_output_{rjob}_${{SLURM_JOB_ID}}.log"
 srun ./resbos_root {rjob} >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 echo "resbos_root finished with exit code $EXIT_CODE" | tee -a "$LOG_FILE"
+# resbos_root.f writes "<jobname>.root" in the CWD -- move the final result up to the
+# campaign's top-level dest/ folder so it's easy to find/copy without digging into resbos/
+if [ $EXIT_CODE -eq 0 ] && [ -f "{rjob}.root" ]; then
+  mv -f "{rjob}.root" "{cfg.dest}/{rjob}.root"
+  echo "moved {rjob}.root -> {cfg.dest}/{rjob}.root" | tee -a "$LOG_FILE"
+fi
+{timing_fn(cfg)}
+log_elapsed "resbos ({rjob}, exit=$EXIT_CODE)"
 exit $EXIT_CODE
 """
 
@@ -497,6 +537,8 @@ cd ${{SLURM_SUBMIT_DIR}}
 python3 "{SELF}" _merge_points {prefix} {width} {npts} {header_lines} {prefix}_combined.out
 EXIT_CODE=$?
 [ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {prefix}_combined.out {per_point} {npts * nqt} || EXIT_CODE=1
+{timing_fn(cfg)}
+log_elapsed "{prefix} merge (exit=$EXIT_CODE)"
 exit $EXIT_CODE
 """
 
@@ -592,7 +634,7 @@ def build_points(cfg, args):
     y_vals = unique_sorted_vals([y for y, _ in points])
     qt_vals = [l.strip() for l in open(ref_qt[0]) if l.strip()]
 
-    sub = ["#!/bin/bash", "set -e", ""]
+    sub = ["#!/bin/bash", "set -e", *timing_header_lines(cfg)]
     ecm = cfg.ecm
     for vtype in cfg.procs:
         tag, jw = PROCS[vtype]
@@ -733,7 +775,7 @@ def build(cfg, args):
         instantiate_shard_scripts(cfg, folder, label, exe, hdr, npts, args.clean_shards)
 
     # ---- per boson: .in files + submit lines
-    sub = ["#!/bin/bash", "set -e",
+    sub = ["#!/bin/bash", "set -e", *timing_header_lines(cfg),
            "run_shards() {   # dir script job nshards -> prints the merge job id",
            '  local out; out=$(cd "$1" && bash "$2" "$3" "0-$(($4 - 1))") || return 1',
            '  echo "$out" >&2',

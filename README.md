@@ -176,11 +176,29 @@ switches `run_process.py` into a mode that mirrors those experiments' own `run.s
 measured `(y,Q)` point (single-value `q_grid.inp`/`y_grid.inp`, the template's full `qt_grid.inp` swept in
 every job), run as a SLURM array (`dest/<folder>/run_<job>_points.sb`, optionally throttled with `[grids]
 throttle`), then merged (`run_<job>_merge.sb`, header-stripped concatenation + the same row-count check as a
-normal sharded merge) into `<job>_combined.out`. Only `w_pert`/`w_asym`/`legacy_Y`/`legacy_main` run in this
-mode — `get_yk_new`/`resbos` need one shared Yk grid for the whole campaign, which doesn't fit a per-point
-structure, so they're skipped entirely (`--resbos-only` refuses to run against an experimental-grid `dest`).
+normal sharded merge) into `<job>_combined.out`. `get_yk_new` and `resbos` then run once per boson, fed those
+merged files (`--resbos-only` still refuses to run against an experimental-grid `dest`, since it assumes
+plain, non-`_combined` file names). `get_yk_new`'s dummy `R_Ai` (NLO only) is written as the *full*
+unique-Q × unique-y rectangular closure, not the real (irregular) point set — `get_yk_new.f`'s `CheckSum`
+requires `NQ×Ny×NqT == total rows`, which a genuine sparse point set can never satisfy even with an
+all-1 R_Ai the values of which are unused at NLO; this closure only has to pass that structural check,
+it adds no physics and the K-factor itself is still computed from the real points only.
 
 The full grid is 80 Q x 153 qT x 143 y = 1,750,320 points.
+
+### Timing log and the final .root file
+
+`dest/timing.log` tracks the campaign end to end: `submit_all.sh` writes the first line (`T0 <epoch>`,
+the campaign's own start time) before submitting anything, and every merge job, `get_yk_new` job and
+`resbos` job appends one locked (`flock`) line when it finishes — stage name, exit code, and wall-clock
+time elapsed since `T0` (queue wait included, since it's measured from submission, not from when the
+job actually started running). Concurrent array-task output isn't logged (would be too noisy — only the
+merge step per stage, and `get_yk_new`/`resbos`, log a line) so the file stays a short, readable summary
+you can `cat` for a quick "how far did it get, how long did each step take" check.
+
+`resbos_root` writes its ntuple as `<jobname>.root` inside `dest/resbos/`; the `resbos` job script moves
+it up to `dest/<jobname>.root` on success, so the final result sits directly in the campaign's top-level
+folder — easy to find and `scp`/copy out without digging into `resbos/`.
 
 ### 3.2 Prepare the run folder
 
