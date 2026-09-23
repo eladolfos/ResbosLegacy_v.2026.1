@@ -244,6 +244,32 @@ class Cfg:
         self.exp_q_col = int(self.get("grids", "exp_q_col", "2"))
         self.exp_throttle = self.get("grids", "throttle")   # e.g. "20" -> SLURM --array=1-N%20
 
+        # [grids] generate: build a fine, dense Q x y rectangle (make_grid_from_data.py's
+        # "generate" mode, called in-process) into the template's own legacy/w_pert/w_asym
+        # inp/ before the normal build() runs -- so [templates] doesn't need a pre-baked
+        # grid checked in. Mutually exclusive with [grids] experimental (that mode doesn't
+        # use a shared rectangular grid at all).
+        self.gen_grid = self.get("grids", "generate", "").strip().lower() in ("yes", "true", "1")
+        if self.gen_grid:
+            if self.experimental:
+                die("[grids] generate and [grids] experimental are mutually exclusive")
+            self.gen_n_q = int(self.req("grids", "n_q"))
+            self.gen_n_y = int(self.req("grids", "n_y"))
+            self.gen_q_min = self.get("grids", "q_min")
+            self.gen_q_max = self.get("grids", "q_max")
+            self.gen_q_from = self.get("grids", "q_from")
+            if self.gen_q_from:
+                self.gen_q_from = self.rel(self.gen_q_from)
+            self.gen_q_col = int(self.get("grids", "q_col", "2"))
+            self.gen_q_spacing = self.get("grids", "q_spacing", "linear")
+            self.gen_y_min = self.get("grids", "y_min")
+            self.gen_y_max = self.get("grids", "y_max")
+            self.gen_y_from = self.get("grids", "y_from")
+            if self.gen_y_from:
+                self.gen_y_from = self.rel(self.gen_y_from)
+            self.gen_y_col = int(self.get("grids", "y_col", "1"))
+            self.gen_y_spacing = self.get("grids", "y_spacing", "linear")
+
     def get(self, sec, key, default=None):
         return self.cp.get(sec, key, fallback=default)
 
@@ -649,6 +675,20 @@ def build_points(cfg, args):
     y_vals = unique_sorted_vals([y for y, _ in points])
     qt_vals = [l.strip() for l in open(ref_qt[0]) if l.strip()]
 
+    if npts != len(q_vals) * len(y_vals):
+        print(f"WARNING: these {npts} points are not a perfect Q x y rectangle "
+              f"({len(q_vals)} unique Q x {len(y_vals)} unique y = "
+              f"{len(q_vals) * len(y_vals)}, {len(q_vals) * len(y_vals) - npts} missing). "
+              f"get_yk_new's R_Ai dummy is padded to the full rectangle to pass its own\n"
+              f"         CheckSum (harmless -- unused values), but resbos_root.f's OWN "
+              f"CheckSum on the 'Main data grid' (Legacy's REAL, non-dummy output) has the\n"
+              f"         same NQ*Ny*NqT==rows requirement and CANNOT be padded the same way "
+              f"without faking real physics -- get_yk_new will likely still produce a Yk\n"
+              f"         grid, but resbos will very likely fail with 'File checksum BAD. The "
+              f"grid file is corrupt!' on legacy_..._main_combined.out. For a real resbos/\n"
+              f"         .root result, use a rectangular grid instead (make_grid_from_data.py "
+              f"+ a normal [templates] campaign, e.g. E201_e605_full.ini for E605).")
+
     sub = ["#!/bin/bash", "set -e", *timing_header_lines(cfg)]
     ecm = cfg.ecm
     for vtype in cfg.procs:
@@ -730,6 +770,35 @@ def build_points(cfg, args):
 
 
 # ------------------------------------------------------------------ main flow
+def generate_grid_files(cfg, tlines):
+    """[grids] generate: build a fine Q x y rectangle in-process (same math as
+    make_grid_from_data.py's "generate" mode) and write it into the template's own
+    legacy/w_pert/w_asym inp/, at whatever relative paths their .in files already name --
+    so [templates] doesn't need a pre-baked grid checked in, just the .in structure."""
+    import make_grid_from_data as mgfd
+    from types import SimpleNamespace
+
+    q_ns = SimpleNamespace(q_min=float(cfg.gen_q_min) if cfg.gen_q_min else None,
+                            q_max=float(cfg.gen_q_max) if cfg.gen_q_max else None,
+                            q_from=cfg.gen_q_from, q_col=cfg.gen_q_col)
+    y_ns = SimpleNamespace(y_min=float(cfg.gen_y_min) if cfg.gen_y_min else None,
+                            y_max=float(cfg.gen_y_max) if cfg.gen_y_max else None,
+                            y_from=cfg.gen_y_from, y_col=cfg.gen_y_col)
+    q_lo, q_hi = mgfd.resolve_range(q_ns, "q")
+    y_lo, y_hi = mgfd.resolve_range(y_ns, "y")
+    q_vals = [mgfd.fmt(v) for v in mgfd.spaced(q_lo, q_hi, cfg.gen_n_q, cfg.gen_q_spacing)]
+    y_vals = [mgfd.fmt(v) for v in mgfd.spaced(y_lo, y_hi, cfg.gen_n_y, cfg.gen_y_spacing)]
+
+    for key, folder in (("legacy_Y", "legacy"), ("w_pert", "w_pert"), ("w_asym", "w_asym")):
+        q_rel, qt_rel, y_rel = grid_paths(tlines[key])
+        write(os.path.join(cfg.src, folder, q_rel), "\n".join(q_vals) + "\n")
+        write(os.path.join(cfg.src, folder, y_rel), "\n".join(y_vals) + "\n")
+
+    print(f"[grids] generate: wrote {cfg.gen_n_q} Q ({cfg.gen_q_spacing}, [{mgfd.fmt(q_lo)}, "
+          f"{mgfd.fmt(q_hi)}]) x {cfg.gen_n_y} y ({cfg.gen_y_spacing}, [{mgfd.fmt(y_lo)}, "
+          f"{mgfd.fmt(y_hi)}]) into {cfg.src}'s legacy/w_pert/w_asym inp/")
+
+
 def build(cfg, args):
     for d in ("get_yk_new", "legacy", "resbos", "w_asym", "w_pert"):
         if not os.path.isdir(os.path.join(cfg.src, d)):
@@ -741,6 +810,9 @@ def build(cfg, args):
 
     tpl = {k: cfg.req("templates", k) for k in ("legacy_Y", "legacy_main", "w_pert", "w_asym", "resbos")}
     tlines = {k: read_lines(os.path.join(cfg.src, v)) for k, v in tpl.items()}
+
+    if cfg.gen_grid:
+        generate_grid_files(cfg, tlines)
 
     # ---- grids: every code must read identical ones
     ref = {}

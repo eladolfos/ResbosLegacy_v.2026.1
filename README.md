@@ -163,6 +163,27 @@ luminosity, output format and named cut sets `runs = atlas, nocuts` with `[cuts.
 (modules, LHAPDF, HOPPET, ROOT paths used inside the generated job scripts — set these if your installs
 differ from the defaults).
 
+### Building a grid for a fixed-target campaign
+
+`make_grid_from_data.py` has two modes for building `q_grid.inp`/`y_grid.inp` (`qt_grid.inp` is left
+untouched in both — point `[templates]` at a source whose `qt_grid.inp` is already the one you want):
+
+- `unique` — the grid points are the table's own unique Q/y values (see ExpCustomGrid below for when
+  this fits vs. wastes compute).
+- `generate` — a genuine fine, dense rectangular grid (N linearly- or log-spaced points over a
+  continuous range) — the same role as `templates/7TeV_WpWm`'s 80 Q × 143 y grid, needed to get a real
+  `resbos`/resNLO result (`resbos` interpolates over the grid; it needs it dense and complete, not just
+  wherever an experiment happened to measure). The range is either typed by hand (`--q-min`/`--q-max`)
+  or taken from a data table's own min/max (`--q-from TABLE`, borrowing only the table's *span*, not its
+  individual values, unlike `unique` mode):
+  ```bash
+  python3 make_grid_from_data.py generate \
+      templates/E605_fine/legacy/inp/q_grid.inp templates/E605_fine/legacy/inp/y_grid.inp \
+      --n-q 40 --n-y 25 --q-min 4.0 --q-max 20.0 --y-min -0.5 --y-max 0.5
+  ```
+  As with `unique` mode, copy the same two output files into `w_pert`/`w_asym`'s `inp/` too so all three
+  match by md5 (`run_process.py`'s grid-lockstep check).
+
 ### ExpCustomGrid: one job per experimental point
 
 A fixed-target campaign whose measured points don't form a dense rectangle (most of them: each `(y,Q)` row
@@ -183,6 +204,15 @@ unique-Q × unique-y rectangular closure, not the real (irregular) point set —
 requires `NQ×Ny×NqT == total rows`, which a genuine sparse point set can never satisfy even with an
 all-1 R_Ai the values of which are unused at NLO; this closure only has to pass that structural check,
 it adds no physics and the K-factor itself is still computed from the real points only.
+
+**`resbos` itself, though, generally does NOT reach a real result in this mode.** It runs its own
+`CheckSum` (`resbos_root.f`, same block-counting logic as `get_yk_new.f`'s) on the *Main data grid* —
+Legacy's real, non-dummy `LTO=0` output — with the same `NQ×Ny×NqT==rows` requirement. Unlike `R_Ai`,
+those are real physics values `resbos` actually samples from, so they can't be padded with fake rows the
+way `R_Ai` can; `run_process.py` prints a `WARNING` at prepare time when the points aren't a perfect
+`Q × y` rectangle, since this only ever surfaces (`File checksum BAD. The grid file is corrupt!`) after
+the full run finishes on the cluster. For a real `resbos`/`.root` result, build a genuine rectangular
+grid instead (`make_grid_from_data.py` + a normal `[templates]` campaign — e.g. `E201_e605_full.ini`).
 
 The full grid is 80 Q x 153 qT x 143 y = 1,750,320 points.
 
