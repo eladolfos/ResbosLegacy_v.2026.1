@@ -156,9 +156,11 @@ w_asym = 4
 ```
 
 Optional sections (all documented in the example file): `[grids] active` to run a sub-range of the grid,
-`[legacy]` overrides (`bmax`, `nonpert`), `[resbos]` (VEGAS settings, seed, luminosity, output format and named
-cut sets `runs = atlas, nocuts` with `[cuts.<name>]`) and `[environment]` (modules, LHAPDF, HOPPET, ROOT paths
-used inside the generated job scripts — set these if your installs differ from the defaults).
+`[legacy]` overrides (`bmax`, `nonpert`, `ibeam`, `fract_n` — the latter two for fixed-target/nuclear-target
+runs, e.g. `ibeam = 0` + `fract_n = 0.54d0` for a p+Cu target; applied to both the `legacy_Y` and `legacy_main`
+`.in` files), `[resbos]` (VEGAS settings, seed, luminosity, output format and named cut sets `runs = atlas,
+nocuts` with `[cuts.<name>]`) and `[environment]` (modules, LHAPDF, HOPPET, ROOT paths used inside the
+generated job scripts — set these if your installs differ from the defaults).
 
 The full grid is 80 Q x 153 qT x 143 y = 1,750,320 points.
 

@@ -42,7 +42,21 @@ import sys
 SELF = os.path.abspath(__file__)
 HERE = os.path.dirname(SELF)
 HDR_RE = re.compile(rb"\s*Q\s*,\s*qT\s*,\s*y")
-PROCS = {"W+": ("Wp", 1), "W-": ("Wm", -1)}          # Type_V -> (file tag, JWTYPE)
+PROCS = {                                            # Type_V -> (file tag, JWTYPE)
+    "W+": ("Wp", 1),
+    "W-": ("Wm", -1),
+    "Z0": ("Z0", 2),                                 # w_pert/w_asym: JWTYPE=2 ("neutral current"); Legacy Type_V
+    "A0": ("A0", 2),                                 # distinguishes Z0 (resonance) from A0 (pure photon) -- both
+}                                                     # use the SAME JWTYPE=2 in w_pert/w_asym (confirmed against
+                                                      # a real working E605 w_pert.in in New_kFactorCT25/
+                                                      # FixedTarget_pp830a016_yao_09182026/, NOT the naive
+                                                      # DATA jwm,jwp,jz,jph,JHB /-1,1,2,3,4/ jph=3 reading).
+                                                      # NOTE: get_yk_new.f only knows ZU/ZD/W+/W-/A0 (get_yk_new.f:
+                                                      # 181-200) -- Z0 still STOPs ('convert is not assigned to
+                                                      # this Boson yet!'); A0 works at NLO (its convert factor is
+                                                      # provably unused there) but STOPs at NNLO (no real
+                                                      # conversion constant implemented). Z0/NNLO-A0: known, not
+                                                      # handled here.
 # stage: (folder, executable, label used in the shard scripts, header lines, lines/point)
 STAGES = {
     "w_pert":      ("w_pert", "w_pert", "w_pert", 3, 1),
@@ -456,6 +470,10 @@ def build(cfg, args):
                     put(lines, find(lines, "bMax", "bMax"), cfg.get("legacy", "bmax"))
                 if cfg.get("legacy", "nonpert"):
                     put(lines, find(lines, "g1, g2, g3, Q0, nG", "nonpert"), cfg.get("legacy", "nonpert"))
+                if cfg.get("legacy", "ibeam"):
+                    set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 0, cfg.get("legacy", "ibeam"))
+                if cfg.get("legacy", "fract_n"):
+                    set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 1, cfg.get("legacy", "fract_n"))
                 job = f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}"
             set_active(lines, act, full)
             check_jobname(job)

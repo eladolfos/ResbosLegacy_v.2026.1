@@ -184,6 +184,16 @@ C initialization
            convert_0=1.0D0/Facd
          elseif(itype.eq.'W+' .or. itype.eq.'W-') then
            convert_0=1.0D0/Facw
+         elseif(itype.eq.'A0') then
+CCPY convert/convert_0 only feed into the NNLO branch below (a_L0=
+C a_L02*convert etc.); at NLO they are never used, so this value is a
+C placeholder. NNLO for A0 needs a real Facu/Facd/Facw-like constant,
+C which is not implemented -- stop rather than silently use 1.0D0.
+           if (iorder=="NNLO") then
+             Print*,' A0 at NNLO has no convert factor implemented!'
+             stop
+           endif
+           convert_0=1.0D0
          else
            Print*,' convert is not assigned to this Boson yet!'
            stop

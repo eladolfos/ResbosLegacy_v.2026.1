@@ -49,7 +49,7 @@ make clean
 5. Combining results according to QCD order (NLO vs NNLO)
 
 **Key Parameters**:
-- `Boson`/`itype`: particle type, checked verbatim against `'ZU'`, `'ZD'`, `'W+'`, `'W-'` (get_yk_new.f:181-185) — other strings (e.g. `DY`) fall through without a matching branch
+- `Boson`/`itype`: particle type, checked verbatim against `'ZU'`, `'ZD'`, `'W+'`, `'W-'`, `'A0'` (get_yk_new.f:181-200) — other strings (e.g. `DY`, `Z0`) fall through without a matching branch and STOP. `'A0'`'s `convert` factor is a placeholder (`1.0D0`), valid only at NLO where it's provably unused (only the `iorder=="NNLO"` branch applies `convert`); requesting NNLO with `A0` STOPs explicitly (no real conversion constant implemented for that case)
 - `iorder`: calculation order (NLO or NNLO)
 - `iYPiece`: controls which calculation piece to use
 - `iYPSw`: perturbative calculation switch
