@@ -493,11 +493,14 @@ exit $EXIT_CODE
 
 def build_points(cfg, args):
     """[grids] experimental set: one job per (y,Q) row of the data table (Yao's run.sh
-    pattern) instead of one shared rectangular grid. Only w_pert/w_asym/legacy_Y/
-    legacy_main run: get_yk_new/resbos need one shared Yk grid for the whole campaign,
-    which doesn't fit a per-point structure (Yao's own point campaigns never used them
-    either -- combine.sh just concatenates the raw w_pert/legacy output)."""
-    for d in ("legacy", "w_asym", "w_pert"):
+    pattern) instead of one shared rectangular grid. w_pert/w_asym/legacy_Y/legacy_main
+    run per point and are merged into <prefix>_combined.out each; get_yk_new and resbos
+    then run once per boson against those combined files, exactly like build()'s normal
+    campaign does against its single shared grid's outputs -- the merged files keep the
+    same (Q,qT,y) row order across w_pert/w_asym/legacy_Y (same points, same qT grid,
+    written identically for all four stages), which is all get_yk_new's row-by-row match
+    check (eps=1e-8) needs."""
+    for d in ("get_yk_new", "legacy", "resbos", "w_asym", "w_pert"):
         if not os.path.isdir(os.path.join(cfg.src, d)):
             die(f"source folder {cfg.src} has no '{d}/'")
     if os.path.exists(cfg.dest) and not args.reuse:
@@ -507,7 +510,7 @@ def build_points(cfg, args):
     if args.clean_shards:
         print("note: --clean-shards has no effect in [grids] experimental mode (no shard dirs are made)")
 
-    tpl = {k: cfg.req("templates", k) for k in ("legacy_Y", "legacy_main", "w_pert", "w_asym")}
+    tpl = {k: cfg.req("templates", k) for k in ("legacy_Y", "legacy_main", "w_pert", "w_asym", "resbos")}
     tlines = {k: read_lines(os.path.join(cfg.src, v)) for k, v in tpl.items()}
     points = read_points(cfg.experimental, cfg.exp_y_col, cfg.exp_q_col)
     npts = len(points)
@@ -528,10 +531,12 @@ def build_points(cfg, args):
         elif md5(p) != ref_qt[1]:
             die(f"qT grid differs between {ref_qt[0]} and {p}: all codes must use the same qT grid")
     nqt = sum(1 for l in open(ref_qt[0]) if l.strip())
+    total_pts = npts * nqt
     print(f"{cfg.experimental}: {npts} experimental points x {nqt} qT points each "
-          f"({npts * nqt} rows/stage/boson)")
+          f"({total_pts} rows/stage/boson)")
 
     exes = [(STAGES[k][0], STAGES[k][1]) for k in ("w_pert", "w_asym", "legacy_Y")]
+    exes += [("get_yk_new", "get_yk_new"), ("resbos", "resbos_root")]
     missing = [cfg.exe_src(f, e) for f, e in exes if not os.path.isfile(cfg.exe_src(f, e))]
     if missing:
         die("executable(s) not found:\n       " + "\n       ".join(missing) + "\n"
@@ -543,12 +548,16 @@ def build_points(cfg, args):
         src = cfg.exe_src(folder, exe)
         print(f"  {folder}/{exe} <- {src}")
         copy(src, os.path.join(cfg.dest, folder, exe), exe=True)
+    if cfg.order == "NLO":
+        copy(os.path.join(cfg.src, "get_yk_new", "make_dummy_rai.py"),
+             os.path.join(cfg.dest, "get_yk_new", "make_dummy_rai.py"))
 
     sub = ["#!/bin/bash", "set -e", ""]
     ecm = cfg.ecm
     for vtype in cfg.procs:
         tag, jw = PROCS[vtype]
         print(f"\n== {vtype}")
+        combined, merge_ids = {}, {}
         for stage in ("w_pert", "w_asym", "legacy_Y", "legacy_main"):
             folder, exe, _, hdr, k = STAGES[stage]
             prefix = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
@@ -572,9 +581,44 @@ def build_points(cfg, args):
             write(os.path.join(fdir, f"run_{aj}.sb"), abody, exe=True)
             mj, mbody = points_merge_script(cfg, prefix, width, npts, hdr, k, nqt)
             write(os.path.join(fdir, f"run_{mj}.sb"), mbody, exe=True)
+            var = f"M_{stage.upper()}_{tag}"
+            merge_ids[stage] = var
+            combined[stage] = f"{prefix}_combined"       # basename (no .out) of the merged file
             sub.append(f'ARRAY_ID=$(cd "{fdir}" && sbatch --parsable run_{aj}.sb)')
-            sub.append(f'(cd "{fdir}" && sbatch --dependency=afterok:$ARRAY_ID run_{mj}.sb)')
+            sub.append(f'{var}=$(cd "{fdir}" && sbatch --parsable --dependency=afterok:$ARRAY_ID '
+                       f'run_{mj}.sb)')
             print(f"  {stage:<12} {npts} points -> {prefix}_combined.out")
+
+        # ---- get_yk_new: same as build(), but fed the merged _combined.out files
+        yk_dir = os.path.join(cfg.dest, "get_yk_new")
+        rai = cfg.get("get_yk_new", f"r_ai_{tag}")
+        if rai:
+            rai_file = os.path.basename(rai)
+            copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
+            make_rai = ""
+        else:
+            if cfg.order == "NNLO":
+                die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
+            rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
+            make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py '
+                        f'../w_pert/{combined["w_pert"]}.out {rai_file} {int(float(ecm))} '
+                        f'{vtype} {cfg.pdf} || exit 1\n')
+        yk_job, body = yk_script(cfg, tag, vtype, combined, total_pts, rai_file, make_rai)
+        write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+        sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
+                   f'${merge_ids["w_pert"]}:${merge_ids["w_asym"]}:${merge_ids["legacy_Y"]} '
+                   f'--kill-on-invalid-dep=yes run_get_yk_new_{tag}.sb)')
+        print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
+
+        # ---- resbos: one job per [resbos] run, fed the merged legacy_main + the Yk grid above
+        rdir = os.path.join(cfg.dest, "resbos")
+        os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+        runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+        for run in runs:
+            rjob = write_resbos_run(cfg, rdir, tag, run, combined["legacy_main"], yk_job, tlines["resbos"])
+            sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:'
+                       f'${merge_ids["legacy_main"]} --kill-on-invalid-dep=yes run_{rjob}.sb)')
+            print(f"  resbos       {rjob}.in")
         sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
