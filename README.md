@@ -156,11 +156,29 @@ w_asym = 4
 ```
 
 Optional sections (all documented in the example file): `[grids] active` to run a sub-range of the grid,
-`[legacy]` overrides (`bmax`, `nonpert`, `ibeam`, `fract_n` — the latter two for fixed-target/nuclear-target
-runs, e.g. `ibeam = 0` + `fract_n = 0.54d0` for a p+Cu target; applied to both the `legacy_Y` and `legacy_main`
-`.in` files), `[resbos]` (VEGAS settings, seed, luminosity, output format and named cut sets `runs = atlas,
-nocuts` with `[cuts.<name>]`) and `[environment]` (modules, LHAPDF, HOPPET, ROOT paths used inside the
-generated job scripts — set these if your installs differ from the defaults).
+`[grids] experimental` for "ExpCustomGrid" mode (below), `[legacy]` overrides (`bmax`, `nonpert`, `ibeam`,
+`fract_n` — the latter two for fixed-target/nuclear-target runs, e.g. `ibeam = 0` + `fract_n = 0.54d0` for a
+p+Cu target; applied to both the `legacy_Y` and `legacy_main` `.in` files), `[resbos]` (VEGAS settings, seed,
+luminosity, output format and named cut sets `runs = atlas, nocuts` with `[cuts.<name>]`) and `[environment]`
+(modules, LHAPDF, HOPPET, ROOT paths used inside the generated job scripts — set these if your installs
+differ from the defaults).
+
+### ExpCustomGrid: one job per experimental point
+
+A fixed-target campaign whose measured points don't form a dense rectangle (most of them: each `(y,Q)` row
+is essentially unique) wastes enormous compute under the normal one-shared-grid model — `make_grid_from_data.py`
+prints how bad it would be (e.g. E866f: 15 points but 15 unique Q × 15 unique y = 225 grid points, 93% wasted;
+E605 is the exception, 119 points → 18×7=126, only 6% wasted, so it uses a normal grid built with that script
+instead). For the bad cases, set `[grids] experimental = /path/to/data_table` (a whitespace-separated table,
+one measured point per row, `exp_y_col`/`exp_q_col` pick the columns — default 1/2, matching Yao's tables
+under `New_kFactorCT25/FixedTarget_pp830a016_yao_09182026/Workspace/*/<experiment>/<experiment>`). This
+switches `run_process.py` into a mode that mirrors those experiments' own `run.sh`/`combine.sh`: one job per
+measured `(y,Q)` point (single-value `q_grid.inp`/`y_grid.inp`, the template's full `qt_grid.inp` swept in
+every job), run as a SLURM array (`dest/<folder>/run_<job>_points.sb`, optionally throttled with `[grids]
+throttle`), then merged (`run_<job>_merge.sb`, header-stripped concatenation + the same row-count check as a
+normal sharded merge) into `<job>_combined.out`. Only `w_pert`/`w_asym`/`legacy_Y`/`legacy_main` run in this
+mode — `get_yk_new`/`resbos` need one shared Yk grid for the whole campaign, which doesn't fit a per-point
+structure, so they're skipped entirely (`--resbos-only` refuses to run against an experimental-grid `dest`).
 
 The full grid is 80 Q x 153 qT x 143 y = 1,750,320 points.
 

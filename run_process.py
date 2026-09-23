@@ -107,6 +107,55 @@ def grid_paths(lines):
             for m in ("Q grid file name", "qT grid file name", "y grid file name")]
 
 
+def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
+    """Apply the ECM/PDF/boson/[legacy] overrides common to a normal grid campaign
+    (build()) and a per-experimental-point campaign (build_points()); caller still
+    has to set_active() (build()) or write single-point grid files (build_points())."""
+    lines = list(tlines[stage])
+    if stage in ("w_pert", "w_asym"):
+        set_token(lines, find(lines, "ECM,iBeam", "ECM"), 0, ecm)
+        set_token(lines, find(lines, "JWTYPE", "JWTYPE"), 0, str(jw))
+        put(lines, find(lines, "PDF file name", "PDF"), "lha_" + cfg.pdf)
+    else:
+        l2 = find(lines, "ECM,LTO", "ECM,LTO")
+        set_token(lines, l2, 0, ecm if "." in ecm else ecm + ".0")
+        set_token(lines, l2, 1, "3" if stage == "legacy_Y" else "0")
+        put(lines, find(lines, "Type_V", "Type_V"), vtype)
+        put(lines, find(lines, "Evolved PDF file", "PDF"), "lha_" + cfg.pdf)
+        if cfg.get("legacy", "bmax"):
+            put(lines, find(lines, "bMax", "bMax"), cfg.get("legacy", "bmax"))
+        if cfg.get("legacy", "nonpert"):
+            put(lines, find(lines, "g1, g2, g3, Q0, nG", "nonpert"), cfg.get("legacy", "nonpert"))
+        if cfg.get("legacy", "ibeam"):
+            set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 0, cfg.get("legacy", "ibeam"))
+        if cfg.get("legacy", "fract_n"):
+            set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 1, cfg.get("legacy", "fract_n"))
+    return lines
+
+
+def read_points(path, y_col, q_col):
+    """Parse an experimental data table (whitespace-separated, blank/'#' lines skipped)
+    into a list of (y, Q) string pairs, 1-based y_col/q_col -- same convention as Yao's
+    run.sh scripts (awk '{print $1}'=y, '{print $2}'=Q) in New_kFactorCT25/
+    FixedTarget_pp830a016_yao_09182026/Workspace/*/e605(etc.)/run.sh."""
+    if not os.path.isfile(path):
+        die(f"[grids] experimental: {path} not found")
+    pts = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            need = max(y_col, q_col)
+            if len(parts) < need:
+                die(f"{path}: line has fewer than {need} columns: {line!r}")
+            pts.append((parts[y_col - 1], parts[q_col - 1]))
+    if not pts:
+        die(f"{path}: no data rows found")
+    return pts
+
+
 def read_lines(path):
     if not os.path.isfile(path):
         die(f"missing template {path}")
@@ -171,6 +220,19 @@ class Cfg:
         for p in self.procs:
             if p not in PROCS:
                 die(f"process '{p}' not supported yet (supported: {', '.join(PROCS)})")
+        # [grids] experimental: "ExpCustomGrid" mode -- one job per (y,Q) row of a real
+        # experimental data table (like Yao's run.sh), instead of one shared rectangular
+        # grid. Only worth it when the table's unique-Q x unique-y product is close to its
+        # row count (e.g. E605: 119 points, 18x7=126); otherwise a normal template grid
+        # (this key unset) or a grid built with make_grid_from_data.py fits better -- see
+        # that script's docstring and E201_e605_full.ini vs the run.sh-loop experiments
+        # (e866f/e906aF/e866ppxf) discussed when this feature was added.
+        self.experimental = self.get("grids", "experimental")
+        if self.experimental:
+            self.experimental = self.rel(self.experimental)
+        self.exp_y_col = int(self.get("grids", "exp_y_col", "1"))
+        self.exp_q_col = int(self.get("grids", "exp_q_col", "2"))
+        self.exp_throttle = self.get("grids", "throttle")   # e.g. "20" -> SLURM --array=1-N%20
 
     def get(self, sec, key, default=None):
         return self.cp.get(sec, key, fallback=default)
@@ -380,6 +442,151 @@ def resbos_add(cfg, args):
             print(f'  (cd "{d}" && sbatch {script})')
 
 
+# ------------------------------------------------------------------ ExpCustomGrid (ye. one job per point)
+def points_array_script(cfg, exe, prefix, width, npts):
+    """SLURM array job: task i cds into points/pt<i>/ (already holding <prefix>_pt<i>.in
+    and its own single-point inp/) and runs the executable there, Yao-run.sh-style."""
+    job = f"{prefix}_points"
+    arr = f"1-{npts}" + (f"%{cfg.exp_throttle}" if cfg.exp_throttle else "")
+    return job, f"""#!/bin/bash --login
+#SBATCH --job-name={job}
+#SBATCH --output=slurm_{job}_%A_%a.out
+#SBATCH --error=slurm_{job}_%A_%a.err
+#SBATCH --time=02:00:00
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1
+#SBATCH --mem-per-cpu=4G
+#SBATCH --partition=general-long
+#SBATCH --array={arr}
+
+cd ${{SLURM_SUBMIT_DIR}}
+{env_lines(cfg)}
+PT=$(printf "%0{width}d" $SLURM_ARRAY_TASK_ID)
+JOBNAME="{prefix}_pt${{PT}}"
+cd "points/pt${{PT}}"
+srun ../../{exe} "$JOBNAME"
+EXIT_CODE=$?
+echo "$JOBNAME finished with exit code $EXIT_CODE"
+exit $EXIT_CODE
+"""
+
+
+def points_merge_script(cfg, prefix, width, npts, header_lines, per_point, nqt):
+    """Strip each point's header (merge_points.py CLI below) and concatenate, then verify
+    the combined row count -- same idea as merge_shards.py/the shard-array's row-count check."""
+    job = f"{prefix}_merge"
+    return job, f"""#!/bin/bash --login
+#SBATCH --job-name={job}
+#SBATCH --output=slurm_{job}_%j.out
+#SBATCH --error=slurm_{job}_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1
+#SBATCH --mem=4G
+#SBATCH --partition=general-long
+
+cd ${{SLURM_SUBMIT_DIR}}
+python3 "{SELF}" _merge_points {prefix} {width} {npts} {header_lines} {prefix}_combined.out
+EXIT_CODE=$?
+[ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {prefix}_combined.out {per_point} {npts * nqt} || EXIT_CODE=1
+exit $EXIT_CODE
+"""
+
+
+def build_points(cfg, args):
+    """[grids] experimental set: one job per (y,Q) row of the data table (Yao's run.sh
+    pattern) instead of one shared rectangular grid. Only w_pert/w_asym/legacy_Y/
+    legacy_main run: get_yk_new/resbos need one shared Yk grid for the whole campaign,
+    which doesn't fit a per-point structure (Yao's own point campaigns never used them
+    either -- combine.sh just concatenates the raw w_pert/legacy output)."""
+    for d in ("legacy", "w_asym", "w_pert"):
+        if not os.path.isdir(os.path.join(cfg.src, d)):
+            die(f"source folder {cfg.src} has no '{d}/'")
+    if os.path.exists(cfg.dest) and not args.reuse:
+        die(f"{cfg.dest} already exists (use --reuse to refresh its .in files and scripts)")
+    if os.path.realpath(cfg.dest) == os.path.realpath(cfg.src):
+        die("dest must differ from source")
+    if args.clean_shards:
+        print("note: --clean-shards has no effect in [grids] experimental mode (no shard dirs are made)")
+
+    tpl = {k: cfg.req("templates", k) for k in ("legacy_Y", "legacy_main", "w_pert", "w_asym")}
+    tlines = {k: read_lines(os.path.join(cfg.src, v)) for k, v in tpl.items()}
+    points = read_points(cfg.experimental, cfg.exp_y_col, cfg.exp_q_col)
+    npts = len(points)
+    width = len(str(npts))
+
+    # ---- qT grid: every code must read the identical one. Q/y become single-value files
+    # the driver writes itself (identically for all four stages), so no lockstep check is
+    # needed for those the way build() needs one for its one shared Q/qT/y grid files.
+    ref_qt = None
+    for stage in ("w_pert", "w_asym", "legacy_Y", "legacy_main"):
+        folder = STAGES[stage][0]
+        qt_rel = grid_paths(tlines[stage])[1]
+        p = os.path.join(cfg.src, folder, qt_rel)
+        if not os.path.isfile(p):
+            die(f"grid {p} not found")
+        if ref_qt is None:
+            ref_qt = (p, md5(p))
+        elif md5(p) != ref_qt[1]:
+            die(f"qT grid differs between {ref_qt[0]} and {p}: all codes must use the same qT grid")
+    nqt = sum(1 for l in open(ref_qt[0]) if l.strip())
+    print(f"{cfg.experimental}: {npts} experimental points x {nqt} qT points each "
+          f"({npts * nqt} rows/stage/boson)")
+
+    exes = [(STAGES[k][0], STAGES[k][1]) for k in ("w_pert", "w_asym", "legacy_Y")]
+    missing = [cfg.exe_src(f, e) for f, e in exes if not os.path.isfile(cfg.exe_src(f, e))]
+    if missing:
+        die("executable(s) not found:\n       " + "\n       ".join(missing) + "\n"
+            "       build them first with:  sbatch setup_resbos_legacy.sb   (writes bin/<code>/<exe>)\n"
+            "       or point to them in the .ini:  [executables] dir = <folder>  (or one key per code)")
+
+    print(f"copying to {cfg.dest}")
+    for folder, exe in exes:
+        src = cfg.exe_src(folder, exe)
+        print(f"  {folder}/{exe} <- {src}")
+        copy(src, os.path.join(cfg.dest, folder, exe), exe=True)
+
+    sub = ["#!/bin/bash", "set -e", ""]
+    ecm = cfg.ecm
+    for vtype in cfg.procs:
+        tag, jw = PROCS[vtype]
+        print(f"\n== {vtype}")
+        for stage in ("w_pert", "w_asym", "legacy_Y", "legacy_main"):
+            folder, exe, _, hdr, k = STAGES[stage]
+            prefix = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
+                      f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}")
+            for i, (y_val, q_val) in enumerate(points, start=1):
+                pt = str(i).zfill(width)
+                job = f"{prefix}_pt{pt}"
+                if len(job) > 95:
+                    die(f"'{job}' is {len(job)} chars; the codes truncate at 100. "
+                        f"Shorten [campaign] name")
+                lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
+                q_rel, qt_rel, y_rel = grid_paths(lines)
+                set_active(lines, (1, nqt, 1, 1, 1, 1, 1, 1, 1), (1, nqt, 1, 1, 1, 1, 1, 1, 1))
+                pdir = os.path.join(cfg.dest, folder, "points", f"pt{pt}")
+                write(os.path.join(pdir, q_rel), q_val + "\n")
+                write(os.path.join(pdir, y_rel), y_val + "\n")
+                copy(os.path.join(cfg.src, folder, qt_rel), os.path.join(pdir, qt_rel))
+                write(os.path.join(pdir, job + ".in"), "".join(lines))
+            fdir = os.path.join(cfg.dest, folder)
+            aj, abody = points_array_script(cfg, exe, prefix, width, npts)
+            write(os.path.join(fdir, f"run_{aj}.sb"), abody, exe=True)
+            mj, mbody = points_merge_script(cfg, prefix, width, npts, hdr, k, nqt)
+            write(os.path.join(fdir, f"run_{mj}.sb"), mbody, exe=True)
+            sub.append(f'ARRAY_ID=$(cd "{fdir}" && sbatch --parsable run_{aj}.sb)')
+            sub.append(f'(cd "{fdir}" && sbatch --dependency=afterok:$ARRAY_ID run_{mj}.sb)')
+            print(f"  {stage:<12} {npts} points -> {prefix}_combined.out")
+        sub.append("")
+
+    sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
+    write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)
+    shutil.copyfile(cfg.path, os.path.join(cfg.dest, "campaign.ini"))
+    print(f"\nprepared {cfg.dest}\nnext: bash {os.path.join(cfg.dest, 'submit_all.sh')}")
+    if args.submit:
+        if not shutil.which("sbatch"):
+            die("sbatch not found: use --submit on the HPCC login node")
+        subprocess.check_call(["bash", os.path.join(cfg.dest, "submit_all.sh")])
+
+
 # ------------------------------------------------------------------ main flow
 def build(cfg, args):
     for d in ("get_yk_new", "legacy", "resbos", "w_asym", "w_pert"):
@@ -454,27 +661,9 @@ def build(cfg, args):
         print(f"\n== {vtype}")
         jobs, merge_ids = {}, {}
         for stage, (folder, exe, label, hdr, k) in STAGES.items():
-            lines = list(tlines[stage])
-            if stage in ("w_pert", "w_asym"):
-                set_token(lines, find(lines, "ECM,iBeam", "ECM"), 0, ecm)
-                set_token(lines, find(lines, "JWTYPE", "JWTYPE"), 0, str(jw))
-                put(lines, find(lines, "PDF file name", "PDF"), "lha_" + cfg.pdf)
-                job = f"{cfg.name}_{stage}_{tag}"
-            else:
-                l2 = find(lines, "ECM,LTO", "ECM,LTO")
-                set_token(lines, l2, 0, ecm if "." in ecm else ecm + ".0")
-                set_token(lines, l2, 1, "3" if stage == "legacy_Y" else "0")
-                put(lines, find(lines, "Type_V", "Type_V"), vtype)
-                put(lines, find(lines, "Evolved PDF file", "PDF"), "lha_" + cfg.pdf)
-                if cfg.get("legacy", "bmax"):
-                    put(lines, find(lines, "bMax", "bMax"), cfg.get("legacy", "bmax"))
-                if cfg.get("legacy", "nonpert"):
-                    put(lines, find(lines, "g1, g2, g3, Q0, nG", "nonpert"), cfg.get("legacy", "nonpert"))
-                if cfg.get("legacy", "ibeam"):
-                    set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 0, cfg.get("legacy", "ibeam"))
-                if cfg.get("legacy", "fract_n"):
-                    set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 1, cfg.get("legacy", "fract_n"))
-                job = f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}"
+            lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
+            job = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
+                   f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}")
             set_active(lines, act, full)
             check_jobname(job)
             inpath = os.path.join(cfg.dest, folder, job + ".in")
@@ -559,9 +748,39 @@ def cmd_check(path, per_point, npts):
     sys.exit(0 if rows == want else 1)
 
 
+def cmd_merge_points(prefix, width, npts, header_lines, out_file):
+    """Concatenate points/pt<i>/<prefix>_pt<i>.out (i=1..npts), stripping each one's own
+    header_lines-line header and keeping only the first point's header -- combine.sh's job,
+    run from run_process.py itself instead of a separate script."""
+    width, npts, header_lines = int(width), int(npts), int(header_lines)
+    header, body_chunks, total = None, [], 0
+    for i in range(1, npts + 1):
+        pt = str(i).zfill(width)
+        path = os.path.join("points", f"pt{pt}", f"{prefix}_pt{pt}.out")
+        if not os.path.isfile(path):
+            print(f"{path}: file not found -- that point hasn't finished or failed")
+            sys.exit(1)
+        with open(path) as f:
+            lines = f.readlines()
+        if len(lines) <= header_lines:
+            print(f"{path}: only {len(lines)} lines, expected a {header_lines}-line header plus data")
+            sys.exit(1)
+        if header is None:
+            header = lines[:header_lines]
+        body_chunks.append(lines[header_lines:])
+        total += len(lines) - header_lines
+    with open(out_file, "w") as f:
+        f.writelines(header)
+        for chunk in body_chunks:
+            f.writelines(chunk)
+    print(f"{out_file}: {header_lines} header lines + {total} data rows from {npts} points")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "_check":
         return cmd_check(*sys.argv[2:5])
+    if len(sys.argv) > 1 and sys.argv[1] == "_merge_points":
+        return cmd_merge_points(*sys.argv[2:7])
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("campaign", help="campaign .ini (see 7TeV_WpWm_example.ini)")
     ap.add_argument("--submit", action="store_true", help="run submit_all.sh after preparing dest")
@@ -574,7 +793,12 @@ def main():
                          "right after the row-count check passes (saves disk; kept on failure for debugging)")
     args = ap.parse_args()
     cfg = Cfg(args.campaign)
-    (resbos_add if args.resbos_only else build)(cfg, args)
+    if args.resbos_only:
+        if cfg.experimental:
+            die("--resbos-only doesn't apply in [grids] experimental mode "
+                "(get_yk_new/resbos aren't run there at all)")
+        return resbos_add(cfg, args)
+    (build_points if cfg.experimental else build)(cfg, args)
 
 
 if __name__ == "__main__":
