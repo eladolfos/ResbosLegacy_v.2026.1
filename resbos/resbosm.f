@@ -89,7 +89,7 @@ C
       COMMON/MY_SUSY/A_SUSY,B_SUSY,XMHM,GAMHM,XMH0,GAMH0
       COMMON/EFFIC/NIN,NOUT
       COMMON/SEED/I_SEED
-      Character*40 Filename, YFilename
+      Character*145 Filename, YFilename
       Common/GridName/ Filename, YFilename
       Character*40 Boson
       Common / Boson / Boson

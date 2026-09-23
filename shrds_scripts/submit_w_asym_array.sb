@@ -72,6 +72,7 @@ fi
 LOG_DIR="${SHARD_DIR}/slurm_logs"
 mkdir -p "$LOG_DIR"
 
+SUBMIT_TS=$(date +%s)   # passed to the merge job so it can log this stage's own duration
 ARRAY_JOBID=$(sbatch --parsable \
   --array="${ARRAY_SPEC}" \
   --output="${LOG_DIR}/slurm_shard_%A_%a.out" \
@@ -83,7 +84,7 @@ MERGE_JOBID=$(sbatch --parsable \
   --dependency=afterok:${ARRAY_JOBID} \
   --output="${LOG_DIR}/slurm_merge_%j.out" \
   --error="${LOG_DIR}/slurm_merge_%j.err" \
-  merge_w_asym_array.sb "$JOBNAME")
+  merge_w_asym_array.sb "$JOBNAME" "$SUBMIT_TS")
 echo "Submitted merge job $MERGE_JOBID (runs automatically after $ARRAY_JOBID succeeds)."
 echo ""
 echo "Check progress with:  squeue -u \$USER"

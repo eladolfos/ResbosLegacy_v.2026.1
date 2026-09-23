@@ -190,10 +190,18 @@ The full grid is 80 Q x 153 qT x 143 y = 1,750,320 points.
 
 `dest/timing.log` tracks the campaign end to end: `submit_all.sh` writes the first line (`T0 <epoch>`,
 the campaign's own start time) before submitting anything, and every merge job, `get_yk_new` job and
-`resbos` job appends one locked (`flock`) line when it finishes — stage name, exit code, and wall-clock
-time elapsed since `T0` (queue wait included, since it's measured from submission, not from when the
-job actually started running). Concurrent array-task output isn't logged (would be too noisy — only the
-merge step per stage, and `get_yk_new`/`resbos`, log a line) so the file stays a short, readable summary
+`resbos` job appends one locked (`flock`) line when it finishes (so the file only ever grows, and a
+stage showing up in it means that stage is done) with two numbers:
+- `elapsed_since_start` — wall-clock time since the whole campaign began (`T0`), queue wait included.
+- `duration` — that stage's own time in isolation, excluding time spent waiting on earlier stages:
+  for `w_pert`/`w_asym`/`legacy_Y`/`legacy_main` (array + merge), `submit_all.sh` passes down the
+  moment the array was submitted (the array itself has no dependency, so that's effectively its start);
+  for `get_yk_new`/`resbos` (single jobs gated by `--dependency=afterok:...` on earlier stages), it's
+  just bash's own `$SECONDS`, which only starts counting once SLURM actually dispatches that job --
+  i.e. after its dependency is satisfied, so the wait is already excluded for free.
+
+Concurrent array-task output isn't logged (119 lines per stage would be too noisy — only the merge
+step per stage, and `get_yk_new`/`resbos`, log a line), so the file stays a short, readable summary
 you can `cat` for a quick "how far did it get, how long did each step take" check.
 
 `resbos_root` writes its ntuple as `<jobname>.root` inside `dest/resbos/`; the `resbos` job script moves

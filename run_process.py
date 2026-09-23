@@ -292,11 +292,12 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean
     write(os.path.join(d, f"run_{label}_array.sb"), conv(read("run_w_asym_array.sb")), exe=True)
     # after merging, verify the row count (legacy Y-piece files have 3 lines per point, the rest 1)
     check = (f'\n# row-count check + timing log added by run_process.py\n'
+             f'STAGE_T0="$2"   # submit_*_array.sh passes when the array job was submitted\n'
              f'case "$JOBNAME" in *_legacy_*_Y) K=3;; *) K=1;; esac\n'
              f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts}\n'
              f'CHECK_EXIT=$?\n'
              f'{timing_fn(cfg)}'
-             f'log_elapsed "{label} merge ($JOBNAME, exit=$CHECK_EXIT)"\n'
+             f'log_elapsed "{label} merge ($JOBNAME, exit=$CHECK_EXIT)" "$STAGE_T0"\n'
              f'[ $CHECK_EXIT -eq 0 ] || exit 1\n')
     if clean_shards:
         # only reached if the check above passed (it exits 1 otherwise): the shards are kept for debugging on failure
@@ -339,18 +340,31 @@ def timing_header_lines(cfg):
 
 
 def timing_fn(cfg):
-    """Bash function `log_elapsed STAGE`: append a locked, timestamped line to dest/timing.log
-    with the wall-clock time elapsed since the campaign started (submit_all.sh's T0 line)."""
+    """Bash function `log_elapsed STAGE [STAGE_START_EPOCH]`: append a locked, timestamped
+    line to dest/timing.log. Always reports elapsed-since-campaign-start (T0, written by
+    submit_all.sh). Also reports that STAGE's own isolated duration, two ways:
+    - STAGE_START_EPOCH given (array+merge stages: w_pert/w_asym/legacy_Y/legacy_main --
+      the merge job doesn't know how long the preceding array took, so build()/build_points()
+      pass down the epoch when the array was submitted -- the array itself has no
+      dependency, so submission time is effectively its start time).
+    - STAGE_START_EPOCH omitted (get_yk_new/resbos -- single, non-array jobs that DO have a
+      --dependency on earlier stages, so bash's own $SECONDS, counting from when this
+      script itself started running, i.e. only once SLURM actually dispatched it, already
+      excludes time spent waiting on those dependencies -- no argument-passing needed)."""
     log = os.path.join(cfg.dest, "timing.log")
     return (f'TIMING_LOG="{log}"\n'
-            'log_elapsed() {   # log_elapsed STAGE\n'
-            '  local t0 now elapsed\n'
+            'log_elapsed() {   # log_elapsed STAGE [STAGE_START_EPOCH]\n'
+            '  local t0 now elapsed stage_t0 dur dur_str\n'
             '  t0=$(awk \'/^T0 /{print $2; exit}\' "$TIMING_LOG" 2>/dev/null)\n'
             '  now=$(date +%s)\n'
             '  elapsed=$([ -n "$t0" ] && echo $((now - t0)) || echo -1)\n'
+            '  stage_t0="$2"\n'
+            '  dur=$([ -n "$stage_t0" ] && echo $((now - stage_t0)) || echo $SECONDS)\n'
+            '  dur_str=$(printf \'%ss (%dh%02dm%02ds)\' "$dur" $((dur/3600)) $(((dur%3600)/60)) $((dur%60)))\n'
             '  { flock -x 201\n'
-            '    printf \'%s  %-40s  elapsed_since_start=%ss (%dh%02dm%02ds)\\n\' \\\n'
-            '      "$(date \'+%F %T\')" "$1" "$elapsed" $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) \\\n'
+            '    printf \'%s  %-40s  duration=%-18s elapsed_since_start=%ss (%dh%02dm%02ds)\\n\' \\\n'
+            '      "$(date \'+%F %T\')" "$1" "$dur_str" "$elapsed" \\\n'
+            '      $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) \\\n'
             '      >> "$TIMING_LOG"\n'
             '  } 201>>"$TIMING_LOG.lock"\n'
             '}\n')
@@ -534,11 +548,12 @@ def points_merge_script(cfg, prefix, width, npts, header_lines, per_point, nqt):
 #SBATCH --partition=general-long
 
 cd ${{SLURM_SUBMIT_DIR}}
+STAGE_T0="$1"   # when the points array job was submitted, passed by build_points()
 python3 "{SELF}" _merge_points {prefix} {width} {npts} {header_lines} {prefix}_combined.out
 EXIT_CODE=$?
 [ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {prefix}_combined.out {per_point} {npts * nqt} || EXIT_CODE=1
 {timing_fn(cfg)}
-log_elapsed "{prefix} merge (exit=$EXIT_CODE)"
+log_elapsed "{prefix} merge (exit=$EXIT_CODE)" "$STAGE_T0"
 exit $EXIT_CODE
 """
 
@@ -666,9 +681,10 @@ def build_points(cfg, args):
             var = f"M_{stage.upper()}_{tag}"
             merge_ids[stage] = var
             combined[stage] = f"{prefix}_combined"       # basename (no .out) of the merged file
+            sub.append('STAGE_T0=$(date +%s)')
             sub.append(f'ARRAY_ID=$(cd "{fdir}" && sbatch --parsable run_{aj}.sb)')
             sub.append(f'{var}=$(cd "{fdir}" && sbatch --parsable --dependency=afterok:$ARRAY_ID '
-                       f'run_{mj}.sb)')
+                       f'run_{mj}.sb "$STAGE_T0")')
             print(f"  {stage:<12} {npts} points -> {prefix}_combined.out")
 
         # ---- get_yk_new: same as build(), but fed the merged _combined.out files

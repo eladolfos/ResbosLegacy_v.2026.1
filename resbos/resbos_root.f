@@ -852,7 +852,7 @@ CCPY USED FOR SEPERATING NLO AND NLO_SIG CONTRIBUTIONS
       REAL*8 QT_V_SEP
       COMMON/NLO/ QT_V_SEP
 
-      CHARACTER*45 Filename, YFilename, KPFileName, KYFileName
+      CHARACTER*145 Filename, YFilename, KPFileName, KYFileName
       Common/GridName/ Filename, YFilename
       Real*8 ECMC
       Common /ECMC/ ECMC
@@ -3726,7 +3726,7 @@ C
       Real*8 ECMC
       Character*78 dummy
       Character*40 Boson
-      Character*45 Filename
+      Character*145 Filename
 CsB   The dimensions below give the maximal possible gridsize.
       Parameter (MD1 = 200, MD2 = 300, MD3 = 100)
       Dimension X1A(0:MD1), X2A(0:MD2), X3A(0:MD3)
@@ -4365,7 +4365,7 @@ C           3 = K-factor for Pert piece
 C           4 = K-factor for Y piece
 C
       Implicit Double Precision (A-H,O-Z)
-      Character*45 Filename
+      Character*145 Filename
       Common / Dims  / iD1,iD2,iD3, iY1,iY2,iY3
       Common / DimsK / iP1,iP2,iP3, iK1,iK2,iK3
       Logical Testing
@@ -4432,7 +4432,7 @@ C   be #####.
       character*8  dummy2
       equivalence (dummy1,dummy2)
 
-      character*45 FileName
+      character*145 FileName
 
       iHead=0
       dummy1=' '
@@ -4456,7 +4456,7 @@ CsB * *******************************************************************
       Subroutine Sample (iUnit,iHead,Filename,iComp,Length,NC, Number)
 
       Implicit Double Precision (A-H,O-Z)
-      Character*45 Filename
+      Character*145 Filename
       Logical Testing
       Parameter (NCMx = 20)
       Dimension A(NCMx)
@@ -4508,7 +4508,7 @@ CsB * *******************************************************************
 
       Subroutine Column (iUnit, iHead, Filename, NC)
       Implicit Double Precision (A-H,O-Z)
-      Character*45 Filename
+      Character*145 Filename
       Logical Testing
       Parameter (NCMx = 20)
       Dimension A(NCMx)
@@ -4567,7 +4567,7 @@ C
       Real*8 ECMC
       Character*78 Dummy
       Character*40 Boson
-      Character*45 FileName
+      Character*145 FileName
 CsB   The dimensions below give the maximal possible gridsize.
       Parameter (MD1 = 200, MD2 = 300, MD3 = 100)
       Dimension X1P(0:MD1), X2P(0:MD2), X3P(0:MD3)
@@ -4822,7 +4822,7 @@ CsB -------------------------------------------------------------------------
 CsB -------------------------------------------------------------------------
 
       Implicit Double Precision (A-H,O-Z)
-      Character*45 Filename
+      Character*145 Filename
 
       Print*, ' Checking consistency of ', Filename
 
@@ -4912,7 +4912,7 @@ CCPY
       COMMON/GRID_FILE_FORM/ Y_ONE_SIDE
       Common / MatchGridCom / iMatchOut
 
-      CHARACTER*45 Filename,YFilename, KPFileName, KYFileName
+      CHARACTER*145 Filename,YFilename, KPFileName, KYFileName
       Common/GridName/ Filename, YFilename
       Character*78 dummy
 
@@ -5131,7 +5131,7 @@ CCPY
 
       Common / MatchGridCom / iMatchOut
 
-      CHARACTER*45 Filename,YFilename, KPFileName, KYFileName
+      CHARACTER*145 Filename,YFilename, KPFileName, KYFileName
       Common/GridName/ Filename, YFilename
       Character*78 dummy
 
