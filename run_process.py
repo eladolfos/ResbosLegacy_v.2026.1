@@ -114,7 +114,17 @@ def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
     lines = list(tlines[stage])
     if stage in ("w_pert", "w_asym"):
         set_token(lines, find(lines, "ECM,iBeam", "ECM"), 0, ecm)
-        set_token(lines, find(lines, "JWTYPE", "JWTYPE"), 0, str(jw))
+        jwtype_line = find(lines, "JWTYPE", "JWTYPE")
+        set_token(lines, jwtype_line, 0, str(jw))
+        if jw == 2:
+            # JWTYPE=2 (jz): w_pert.f/w_asym.f pick BOSON from JZ_TYPE (1=ZU,-1=ZD,0=Z0/general
+            # couplings), a DIFFERENT token the W+/W- template this was copied from leaves at 1
+            # (ZU) -- confirmed against a real working w_pert.in (New_kFactorCT25/
+            # FixedTarget_pp830a016_yao_09182026/Workspace/FixedTargetKFactor/e605/w_pert.in:
+            # "2,0,0") that it must be reset to 0 for both our Z0 and A0 (Legacy's Type_V is what
+            # actually distinguishes them there), or w_pert/w_asym silently compute wrong (ZU)
+            # physics instead. w_pert: JWTYPE,IDO_CBAR,JZ_TYPE; w_asym: JWTYPE,JZ_TYPE.
+            set_token(lines, jwtype_line, 2 if stage == "w_pert" else 1, "0")
         put(lines, find(lines, "PDF file name", "PDF"), "lha_" + cfg.pdf)
     else:
         l2 = find(lines, "ECM,LTO", "ECM,LTO")
@@ -491,6 +501,33 @@ exit $EXIT_CODE
 """
 
 
+def unique_sorted_vals(values):
+    """De-dup a list of number strings by float value (keep first-seen string form),
+    sorted ascending -- same rule as make_grid_from_data.py's unique_sorted()."""
+    seen = {}
+    for v in values:
+        k = float(v)
+        if k not in seen:
+            seen[k] = v
+    return [seen[k] for k in sorted(seen)]
+
+
+def write_rect_rai(path, q_vals, y_vals, qt_vals, ecm, vtype, pdf):
+    """Write a dummy (all R_Ai=1) R_Ai file as a genuine rectangular grid (Q outer, y
+    middle, qT inner -- CheckSum's required nesting), covering every unique Q/y pair from
+    an ExpCustomGrid campaign's points instead of just its (irregular) real point set.
+    Exact for NLO (get_yk_new.f only applies R_Ai when iorder=="NNLO"): the combined
+    w_pert/w_asym/legacy_Y files still only have the real points -- this file only has to
+    satisfy get_yk_new.f's CheckSum (Sample()'s block-counting requires NQ*Ny*NqT ==
+    total rows, which an irregular point set can't provide even with all-1 values)."""
+    lines = ["ECM, TYPE_V, PDF\n", f"{ecm} {vtype} {pdf}\n", "  Q,qT,y R_A0 R_A1 R_A2 R_A3\n"]
+    for q in q_vals:
+        for y in y_vals:
+            for qt in qt_vals:
+                lines.append(f"{q} {qt} {y} 1 1 1 1\n")
+    write(path, "".join(lines))
+
+
 def build_points(cfg, args):
     """[grids] experimental set: one job per (y,Q) row of the data table (Yao's run.sh
     pattern) instead of one shared rectangular grid. w_pert/w_asym/legacy_Y/legacy_main
@@ -548,9 +585,12 @@ def build_points(cfg, args):
         src = cfg.exe_src(folder, exe)
         print(f"  {folder}/{exe} <- {src}")
         copy(src, os.path.join(cfg.dest, folder, exe), exe=True)
-    if cfg.order == "NLO":
-        copy(os.path.join(cfg.src, "get_yk_new", "make_dummy_rai.py"),
-             os.path.join(cfg.dest, "get_yk_new", "make_dummy_rai.py"))
+    # (make_dummy_rai.py isn't used here: it reads a real w_pert.out's own point set, which
+    # in this mode is the irregular one that fails get_yk_new.f's CheckSum -- see
+    # write_rect_rai() below, which builds the full rectangular Q x y closure instead)
+    q_vals = unique_sorted_vals([q for _, q in points])
+    y_vals = unique_sorted_vals([y for y, _ in points])
+    qt_vals = [l.strip() for l in open(ref_qt[0]) if l.strip()]
 
     sub = ["#!/bin/bash", "set -e", ""]
     ecm = cfg.ecm
@@ -600,9 +640,9 @@ def build_points(cfg, args):
             if cfg.order == "NNLO":
                 die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
             rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
-            make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py '
-                        f'../w_pert/{combined["w_pert"]}.out {rai_file} {int(float(ecm))} '
-                        f'{vtype} {cfg.pdf} || exit 1\n')
+            write_rect_rai(os.path.join(yk_dir, rai_file), q_vals, y_vals, qt_vals,
+                            int(float(ecm)), vtype, cfg.pdf)
+            make_rai = ""
         yk_job, body = yk_script(cfg, tag, vtype, combined, total_pts, rai_file, make_rai)
         write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
         sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
