@@ -849,7 +849,11 @@ def generate_grid_files(cfg, tlines):
     """[grids] generate: build a fine Q x y rectangle in-process (same math as
     make_grid_from_data.py's "generate" mode) and write it into the template's own
     legacy/w_pert/w_asym inp/, at whatever relative paths their .in files already name --
-    so [templates] doesn't need a pre-baked grid checked in, just the .in structure."""
+    so [templates] doesn't need a pre-baked grid checked in, just the .in structure.
+    w_pert/w_asym are skipped when compute = NLO only (build() doesn't load their
+    templates then -- see tlines' conditional keys in build()); legacy_dsi/legacy_asy
+    don't need their own entry since their grid paths come from the same file as
+    legacy_Y by default (patch_stage() only rewrites the LTO token, not the grid paths)."""
     import make_grid_from_data as mgfd
     from types import SimpleNamespace
 
@@ -864,14 +868,16 @@ def generate_grid_files(cfg, tlines):
     q_vals = [mgfd.fmt(v) for v in mgfd.spaced(q_lo, q_hi, cfg.gen_n_q, cfg.gen_q_spacing)]
     y_vals = [mgfd.fmt(v) for v in mgfd.spaced(y_lo, y_hi, cfg.gen_n_y, cfg.gen_y_spacing)]
 
-    for key, folder in (("legacy_Y", "legacy"), ("w_pert", "w_pert"), ("w_asym", "w_asym")):
+    targets = [("legacy_Y", "legacy")]
+    targets += [(k, k) for k in ("w_pert", "w_asym") if k in tlines]
+    for key, folder in targets:
         q_rel, qt_rel, y_rel = grid_paths(tlines[key])
         write(os.path.join(cfg.src, folder, q_rel), "\n".join(q_vals) + "\n")
         write(os.path.join(cfg.src, folder, y_rel), "\n".join(y_vals) + "\n")
 
     print(f"[grids] generate: wrote {cfg.gen_n_q} Q ({cfg.gen_q_spacing}, [{mgfd.fmt(q_lo)}, "
           f"{mgfd.fmt(q_hi)}]) x {cfg.gen_n_y} y ({cfg.gen_y_spacing}, [{mgfd.fmt(y_lo)}, "
-          f"{mgfd.fmt(y_hi)}]) into {cfg.src}'s legacy/w_pert/w_asym inp/")
+          f"{mgfd.fmt(y_hi)}]) into {cfg.src}'s {'/'.join(f for _, f in targets)} inp/")
 
 
 def build(cfg, args):
