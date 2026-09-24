@@ -58,12 +58,28 @@ PROCS = {                                            # Type_V -> (file tag, JWTY
                                                       # conversion constant implemented). Z0/NNLO-A0: known, not
                                                       # handled here.
 # stage: (folder, executable, label used in the shard scripts, header lines, lines/point)
+# legacy_dsi (LTO=1, NLO_Sig/DeltaSigma) and legacy_asy (LTO=2, Asymptotic) are the two
+# extra pieces [campaign] compute = NLO needs on top of legacy_Y (LTO=3, shared with
+# resNLO) -- confirmed against legacy_final_vesion/main.for: the ~14-line preamble
+# (ECM/IBEAM/PDF/masses/TYPE_V/g1-g3/... echo, written unconditionally before the LTO
+# branch) plus one LTO-specific column-header line = 15 total header lines for every LTO
+# value (matches the already-validated LTO=0/3 count), and both LTO=1 and LTO=2 write
+# exactly one data line per (Q,qT,y) point (same shape as LTO=0/legacy_main, not LTO=3's
+# 3-lines/point) -- WRITE(22,122)/WRITE(22,102) each called once per point, no inner loop
+# writes multiple lines. Not yet run for real (no gfortran here); spot-check against a
+# real LTO=1/LTO=2 output on the HPCC before trusting this at scale.
 STAGES = {
     "w_pert":      ("w_pert", "w_pert", "w_pert", 3, 1),
     "w_asym":      ("w_asym", "w_asym", "w_asym", 3, 1),
     "legacy_Y":    ("legacy", "main", "legacy", 15, 3),
     "legacy_main": ("legacy", "main", "legacy", 15, 1),
+    "legacy_dsi":  ("legacy", "main", "legacy", 15, 1),
+    "legacy_asy":  ("legacy", "main", "legacy", 15, 1),
 }
+LTO_BY_STAGE = {"legacy_Y": "3", "legacy_main": "0", "legacy_dsi": "1", "legacy_asy": "2"}
+LEGACY_SUFFIX = {"legacy_Y": "Y", "legacy_main": "main", "legacy_dsi": "dsi", "legacy_asy": "asy"}
+RESNLO_STAGES = ("w_pert", "w_asym", "legacy_Y", "legacy_main")
+NLO_STAGES = ("legacy_Y", "legacy_dsi", "legacy_asy")
 CHUNK = 16 << 20
 
 
@@ -129,7 +145,7 @@ def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
     else:
         l2 = find(lines, "ECM,LTO", "ECM,LTO")
         set_token(lines, l2, 0, ecm if "." in ecm else ecm + ".0")
-        set_token(lines, l2, 1, "3" if stage == "legacy_Y" else "0")
+        set_token(lines, l2, 1, LTO_BY_STAGE[stage])
         put(lines, find(lines, "Type_V", "Type_V"), vtype)
         put(lines, find(lines, "Evolved PDF file", "PDF"), "lha_" + cfg.pdf)
         if cfg.get("legacy", "bmax"):
@@ -230,6 +246,22 @@ class Cfg:
         for p in self.procs:
             if p not in PROCS:
                 die(f"process '{p}' not supported yet (supported: {', '.join(PROCS)})")
+        # [campaign] compute: resNLO (default, unchanged behaviour), NLO (fixed order via
+        # Legacy LTO=1+LTO=2+LTO=3 phase-space slicing + two resbos runs + hadd -- see
+        # README.md "NLO (fixed order)"), or "NLO, resNLO" for both in one campaign (legacy_Y,
+        # LTO=3, is computed once and shared between them).
+        norm = {"nlo": "NLO", "resnlo": "resNLO"}
+        self.compute = set()
+        for c in self.get("campaign", "compute", "resNLO").split(","):
+            c = c.strip()
+            if not c:
+                continue
+            key = norm.get(c.lower())
+            if not key:
+                die(f"[campaign] compute: '{c}' not recognized (use NLO, resNLO, or 'NLO, resNLO')")
+            self.compute.add(key)
+        if not self.compute:
+            die("[campaign] compute: at least one of NLO, resNLO required")
         # [grids] experimental: "ExpCustomGrid" mode -- one job per (y,Q) row of a real
         # experimental data table (like Yao's run.sh), instead of one shared rectangular
         # grid. Only worth it when the table's unique-Q x unique-y product is close to its
@@ -425,7 +457,16 @@ exit $EXIT_CODE
     return job, body
 
 
-def resbos_script(cfg, rjob, main_job, yk_job):
+def resbos_script(cfg, rjob, main_src, y_src):
+    """main_src/y_src are (folder, job) pairs naming the "Main data grid"/"Y piece grid"
+    inputs -- for resNLO these are legacy(LTO=0)/get_yk_new's Yk grid; for NLO's two
+    phase-space-slicing runs they're both legacy outputs (asy=LTO=2 main + Y=LTO=3 Y-piece
+    directly, or dsi=LTO=1 main + no Y piece at all, y_src=None -> the .in gets "-")."""
+    main_folder, main_job = main_src
+    staging = f"stage ../{main_folder}/{main_job}.out Resbos_grids/{main_job}.out\n"
+    if y_src:
+        y_folder, y_job = y_src
+        staging += f"stage ../{y_folder}/{y_job}.out Resbos_grids/{y_job}.out\n"
     return f"""#!/bin/bash --login
 #SBATCH --job-name={rjob}
 #SBATCH --output=slurm_{rjob}_%j.out
@@ -438,11 +479,8 @@ def resbos_script(cfg, rjob, main_job, yk_job):
 cd ${{SLURM_SUBMIT_DIR}}
 {env_lines(cfg, root=True)}
 {stage_fn(cfg)}
-# the two grids resbos reads: Legacy LTO=0 ("W321 main grid") and the Yk grid from get_yk_new
 mkdir -p Resbos_grids
-stage ../legacy/{main_job}.out Resbos_grids/{main_job}.out
-stage ../get_yk_new/{yk_job}.out Resbos_grids/{yk_job}.out
-
+{staging}
 LOG_FILE="resbos_output_{rjob}_${{SLURM_JOB_ID}}.log"
 srun ./resbos_root {rjob} >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
@@ -459,8 +497,35 @@ exit $EXIT_CODE
 """
 
 
-def write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines):
-    """Write resbos/<name>_<tag>_<run>.in + its .sb from the resbos template + [cuts.<run>]; return the job name."""
+def hadd_script(cfg, hjob, asy_root, dsi_root, out_root):
+    """NLO = phase-space-sliced fixed order: qT>qT_Sep (asy+Y piece resbos run) + qT<qT_Sep
+    (dsi-alone resbos run), combined event-by-event with ROOT's hadd -- the qT_Sep
+    dependence is designed to cancel between the two files (see README.md "NLO (fixed
+    order)"). hadd needs ROOT on PATH, same as resbos_root (env_lines(cfg, root=True))."""
+    return f"""#!/bin/bash --login
+#SBATCH --job-name={hjob}
+#SBATCH --output=slurm_{hjob}_%j.out
+#SBATCH --error=slurm_{hjob}_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1
+#SBATCH --mem=4G
+#SBATCH --partition=general-long
+
+cd ${{SLURM_SUBMIT_DIR}}
+{env_lines(cfg, root=True)}
+hadd -f "{cfg.dest}/{out_root}" "{cfg.dest}/{asy_root}" "{cfg.dest}/{dsi_root}"
+EXIT_CODE=$?
+echo "hadd finished with exit code $EXIT_CODE"
+{timing_fn(cfg)}
+log_elapsed "hadd NLO ({hjob}, exit=$EXIT_CODE)"
+exit $EXIT_CODE
+"""
+
+
+def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=None):
+    """Write resbos/<name>_<tag>_<run>[_<suffix>].in + its .sb from the resbos template +
+    [cuts.<run>]; return the job name. main_src/y_src: see resbos_script(); y_src=None
+    writes "-" (no Y piece) for the NLO dsi-alone run."""
     sec = "cuts." + run
     if run != "default" and not cfg.cp.has_section(sec):
         die(f"[resbos] runs lists '{run}' but there is no [{sec}] section")
@@ -473,8 +538,9 @@ def write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines):
     if cfg.get("resbos", "seed"):
         toks[5] = cfg.req("resbos", "seed")
     put(lines, i, ",".join(toks))
-    put(lines, find(lines, "Main data grid", "main grid"), f'./Resbos_grids/{main_job}.out')
-    put(lines, find(lines, "Y piece grid", "Y grid"), f"./Resbos_grids/{yk_job}.out")
+    put(lines, find(lines, "Main data grid", "main grid"), f"./Resbos_grids/{main_src[1]}.out")
+    put(lines, find(lines, "Y piece grid", "Y grid"),
+        f"./Resbos_grids/{y_src[1]}.out" if y_src else "-")
     for key, marker in (("lepton", "Cuts(1)"), ("mass_qt_y", "Cuts(2)"), ("mt_met", "Cuts(3)")):
         v = cfg.get(sec, key)
         if v:
@@ -485,15 +551,18 @@ def write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines):
         set_token(lines, find(lines, "Luminosity", "luminosity"), 0, cfg.req("resbos", "lumi"))
     if cfg.get("resbos", "output"):
         put(lines, find(lines, "Output fromat", "output"), cfg.req("resbos", "output"))
-    rjob = f"{cfg.name}_{tag}_{run}"
+    rjob = f"{cfg.name}_{tag}_{run}" + (f"_{suffix}" if suffix else "")
     write(os.path.join(rdir, rjob + ".in"), "".join(lines))
-    write(os.path.join(rdir, f"run_{rjob}.sb"), resbos_script(cfg, rjob, main_job, yk_job), exe=True)
+    write(os.path.join(rdir, f"run_{rjob}.sb"), resbos_script(cfg, rjob, main_src, y_src), exe=True)
     return rjob
 
 
 def resbos_add(cfg, args):
     """--resbos-only: dest already has the w_pert/w_asym/legacy/get_yk_new outputs of an earlier run;
     only (re)generate and optionally submit the resbos job(s) for [resbos] runs, reusing them directly."""
+    if "resNLO" not in cfg.compute:
+        die("--resbos-only re-runs the resNLO resbos step (Legacy main grid + get_yk_new's Yk grid); "
+            "add 'resNLO' to [campaign] compute")
     if not os.path.isdir(cfg.dest):
         die(f"{cfg.dest} does not exist: run the full campaign first (no --resbos-only)")
     resbos_lines = read_lines(os.path.join(cfg.src, cfg.req("templates", "resbos")))
@@ -517,7 +586,7 @@ def resbos_add(cfg, args):
                 + "\n       ".join(missing))
         print(f"\n== {vtype}")
         for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, main_job, yk_job, resbos_lines)
+            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", main_job), ("get_yk_new", yk_job), resbos_lines)
             print(f"  resbos       {rjob}.in")
             to_submit.append((rdir, f"run_{rjob}.sb", rjob))
     if args.submit:
@@ -619,7 +688,12 @@ def build_points(cfg, args):
     campaign does against its single shared grid's outputs -- the merged files keep the
     same (Q,qT,y) row order across w_pert/w_asym/legacy_Y (same points, same qT grid,
     written identically for all four stages), which is all get_yk_new's row-by-row match
-    check (eps=1e-8) needs."""
+    check (eps=1e-8) needs. Only resNLO is supported here (NLO fixed order needs a genuine
+    dense Q x y rectangle for its LTO=1/2/3 pieces, same reason resbos itself can't run on
+    an irregular ExpCustomGrid point set -- see the WARNING below)."""
+    if cfg.compute != {"resNLO"}:
+        die("[grids] experimental only supports [campaign] compute = resNLO "
+            "(NLO fixed order needs a dense Q x y rectangle -- use [grids] generate instead)")
     for d in ("get_yk_new", "legacy", "resbos", "w_asym", "w_pert"):
         if not os.path.isdir(os.path.join(cfg.src, d)):
             die(f"source folder {cfg.src} has no '{d}/'")
@@ -753,7 +827,8 @@ def build_points(cfg, args):
         os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
         runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
         for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, combined["legacy_main"], yk_job, tlines["resbos"])
+            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", combined["legacy_main"]),
+                                     ("get_yk_new", yk_job), tlines["resbos"])
             sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:'
                        f'${merge_ids["legacy_main"]} --kill-on-invalid-dep=yes run_{rjob}.sb)')
             print(f"  resbos       {rjob}.in")
@@ -808,15 +883,39 @@ def build(cfg, args):
     if os.path.realpath(cfg.dest) == os.path.realpath(cfg.src):
         die("dest must differ from source")
 
-    tpl = {k: cfg.req("templates", k) for k in ("legacy_Y", "legacy_main", "w_pert", "w_asym", "resbos")}
+    do_resnlo = "resNLO" in cfg.compute
+    do_nlo = "NLO" in cfg.compute
+    needed = set()
+    if do_resnlo:
+        needed |= set(RESNLO_STAGES)
+    if do_nlo:
+        needed |= set(NLO_STAGES)
+    active_stages = [s for s in STAGES if s in needed]
+
+    # ---- templates: legacy_dsi/legacy_asy (LTO=1/2, NLO only) default to the legacy_Y
+    # template -- patch_stage() overwrites the LTO field regardless of what the template
+    # started with, so no new template file is required unless [templates] overrides one.
+    tpl = {"legacy_Y": cfg.req("templates", "legacy_Y"), "resbos": cfg.req("templates", "resbos")}
+    if do_resnlo:
+        tpl["legacy_main"] = cfg.req("templates", "legacy_main")
+        tpl["w_pert"] = cfg.req("templates", "w_pert")
+        tpl["w_asym"] = cfg.req("templates", "w_asym")
+    if do_nlo:
+        tpl["legacy_dsi"] = cfg.get("templates", "legacy_dsi", tpl["legacy_Y"])
+        tpl["legacy_asy"] = cfg.get("templates", "legacy_asy", tpl["legacy_Y"])
     tlines = {k: read_lines(os.path.join(cfg.src, v)) for k, v in tpl.items()}
 
     if cfg.gen_grid:
         generate_grid_files(cfg, tlines)
 
-    # ---- grids: every code must read identical ones
+    # ---- grids: every code that runs must read identical ones. With resNLO, w_pert/w_asym
+    # are cross-checked against legacy_Y's grid; with NLO alone only Legacy itself runs, so
+    # its own grid (shared automatically -- legacy_Y/legacy_main/legacy_dsi/legacy_asy all
+    # read the same inp/ files) needs no cross-code check.
     ref = {}
-    for folder, key in (("w_pert", "w_pert"), ("w_asym", "w_asym"), ("legacy", "legacy_Y")):
+    grid_stages = [("w_pert", "w_pert"), ("w_asym", "w_asym"), ("legacy", "legacy_Y")] if do_resnlo \
+        else [("legacy", "legacy_Y")]
+    for folder, key in grid_stages:
         for role, rel in zip(("Q", "qT", "y"), grid_paths(tlines[key])):
             p = os.path.join(cfg.src, folder, rel)
             if not os.path.isfile(p):
@@ -832,11 +931,13 @@ def build(cfg, args):
     n_of = lambda a, b, s: len(range(a, b + 1, s))
     nqt, ny = n_of(*act[0:3]), n_of(*act[3:6])
     npts = nqt * ny * n_of(*act[6:9])
-    print(f"grid: {counts['Q']} Q x {counts['qT']} qT x {counts['y']} y; active {npts} points")
+    print(f"compute: {', '.join(sorted(cfg.compute))}; grid: {counts['Q']} Q x {counts['qT']} qT x "
+          f"{counts['y']} y; active {npts} points")
 
     # ---- copy only what a run needs
-    exes = [(f, STAGES[k][1]) for f, k in (("w_pert", "w_pert"), ("w_asym", "w_asym"), ("legacy", "legacy_Y"))]
-    exes += [("get_yk_new", "get_yk_new"), ("resbos", "resbos_root")]
+    exes = [("legacy", "main"), ("resbos", "resbos_root")]
+    if do_resnlo:
+        exes += [("w_pert", "w_pert"), ("w_asym", "w_asym"), ("get_yk_new", "get_yk_new")]
     missing = [cfg.exe_src(f, e) for f, e in exes if not os.path.isfile(cfg.exe_src(f, e))]
     if missing:                     # check all before copying anything: no half-made dest
         die("executable(s) not found:\n       " + "\n       ".join(missing) + "\n"
@@ -850,19 +951,29 @@ def build(cfg, args):
         print(f"  {folder}/{exe} <- {src}")
         copy(src, os.path.join(cfg.dest, folder, exe), exe=True)
 
-    for folder, key in (("w_pert", "w_pert"), ("w_asym", "w_asym"), ("legacy", "legacy_Y")):
-        copy_exe(folder, STAGES[key][1])
-        for rel in grid_paths(tlines[key]):
-            copy(os.path.join(cfg.src, folder, rel), os.path.join(cfg.dest, folder, rel))
-    copy_exe("get_yk_new", "get_yk_new")
-    copy_exe("resbos", "resbos_root")
-    if cfg.order == "NLO":
-        copy(os.path.join(cfg.src, "get_yk_new", "make_dummy_rai.py"),
-             os.path.join(cfg.dest, "get_yk_new", "make_dummy_rai.py"))
-    for folder, exe, label, hdr in {(f, e, l, h) for f, e, l, h, _ in STAGES.values()}:
+    for folder, exe in exes:
+        copy_exe(folder, exe)
+    copy(os.path.join(cfg.src, "legacy", grid_paths(tlines["legacy_Y"])[0]),
+         os.path.join(cfg.dest, "legacy", grid_paths(tlines["legacy_Y"])[0]))
+    copy(os.path.join(cfg.src, "legacy", grid_paths(tlines["legacy_Y"])[1]),
+         os.path.join(cfg.dest, "legacy", grid_paths(tlines["legacy_Y"])[1]))
+    copy(os.path.join(cfg.src, "legacy", grid_paths(tlines["legacy_Y"])[2]),
+         os.path.join(cfg.dest, "legacy", grid_paths(tlines["legacy_Y"])[2]))
+    if do_resnlo:
+        for folder, key in (("w_pert", "w_pert"), ("w_asym", "w_asym")):
+            for rel in grid_paths(tlines[key]):
+                copy(os.path.join(cfg.src, folder, rel), os.path.join(cfg.dest, folder, rel))
+        if cfg.order == "NLO":
+            copy(os.path.join(cfg.src, "get_yk_new", "make_dummy_rai.py"),
+                 os.path.join(cfg.dest, "get_yk_new", "make_dummy_rai.py"))
+    for folder, exe, label, hdr in {(STAGES[s][0], STAGES[s][1], STAGES[s][2], STAGES[s][3]) for s in active_stages}:
         instantiate_shard_scripts(cfg, folder, label, exe, hdr, npts, args.clean_shards)
 
-    # ---- per boson: .in files + submit lines
+    # ---- per boson: .in files + submit lines. Stages whose merged output already exists in
+    # dest and passes its own row-count check are reused (not resubmitted); only stages
+    # actually (re)submitted this run feed into downstream --dependency= clauses, so a
+    # dest folder that already has resNLO's outputs and now also asks for NLO only computes
+    # the new legacy_dsi/legacy_asy/resbos/hadd pieces (legacy_Y is shared either way).
     sub = ["#!/bin/bash", "set -e", *timing_header_lines(cfg),
            "run_shards() {   # dir script job nshards -> prints the merge job id",
            '  local out; out=$(cd "$1" && bash "$2" "$3" "0-$(($4 - 1))") || return 1',
@@ -873,11 +984,12 @@ def build(cfg, args):
     for vtype in cfg.procs:
         tag, jw = PROCS[vtype]
         print(f"\n== {vtype}")
-        jobs, merge_ids = {}, {}
-        for stage, (folder, exe, label, hdr, k) in STAGES.items():
+        jobs, merge_ids, submitted = {}, {}, set()
+        for stage in active_stages:
+            folder, exe, label, hdr, k = STAGES[stage]
             lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
             job = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
-                   f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}")
+                   f"{cfg.name}_legacy_{tag}_{LEGACY_SUFFIX[stage]}")
             set_active(lines, act, full)
             check_jobname(job)
             inpath = os.path.join(cfg.dest, folder, job + ".in")
@@ -888,42 +1000,117 @@ def build(cfg, args):
                     f"remove that folder (or use a new dest) so the shards are regenerated")
             write(inpath, "".join(lines))
             jobs[stage] = job
+            out_path = os.path.join(cfg.dest, folder, job + ".out")
+            if valid_output(out_path, k, npts):
+                print(f"  {stage:<12} {job}.out already exists ({k * npts} lines) -- reusing, not resubmitted")
+                continue
+            submitted.add(stage)
             n = cfg.shards(stage)
             var = f"M_{stage.upper()}_{tag}"
             merge_ids[stage] = var
             sub.append(f'{var}=$(run_shards "{os.path.join(cfg.dest, folder)}" submit_{label}_array.sh {job} {n})')
             print(f"  {stage:<12} {job}.in   {n} shard(s)")
 
-        # ---- get_yk_new
-        yk_dir = os.path.join(cfg.dest, "get_yk_new")
-        rai = cfg.get("get_yk_new", f"r_ai_{tag}")
-        if rai:
-            rai_file = os.path.basename(rai)
-            copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
-            make_rai = ""
-        else:
-            if cfg.order == "NNLO":
-                die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
-            rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
-            make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py ../w_pert/{jobs["w_pert"]}.out '
-                        f'{rai_file} {int(float(ecm))} {vtype} {cfg.pdf} || exit 1\n')
-        yk_job, body = yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai)
-        write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
-        sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
-                   f'${merge_ids["w_pert"]}:${merge_ids["w_asym"]}:${merge_ids["legacy_Y"]} '
-                   f'--kill-on-invalid-dep=yes run_get_yk_new_{tag}.sb)')
-        print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
+        def dep_clause(dep_vars):
+            """--dependency=... clause built only from stages actually (re)submitted this
+            run (an unset bash var in --dependency=afterok:$VAR would break sbatch). Entries
+            are stage names (resolved through merge_ids) or bare bash variable names
+            (e.g. "YK_Wp") used as-is."""
+            names = [merge_ids[s] if s in merge_ids else s for s in dep_vars]
+            return (f'--dependency=afterok:{":".join("${" + n + "}" for n in names)} '
+                    f'--kill-on-invalid-dep=yes ') if names else ""
 
-        # ---- resbos: one job per run, never sharded; its grids are staged by the job itself
-        rdir = os.path.join(cfg.dest, "resbos")
-        os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
-        runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
-        for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, jobs["legacy_main"], yk_job, tlines["resbos"])
-            sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:${merge_ids["legacy_main"]} '
-                       f'--kill-on-invalid-dep=yes run_{rjob}.sb)')
-            print(f"  resbos       {rjob}.in")
-        sub.append("")
+        # ---- get_yk_new (resNLO only)
+        yk_job = None
+        if do_resnlo:
+            yk_dir = os.path.join(cfg.dest, "get_yk_new")
+            yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
+            yk_out = os.path.join(yk_dir, yk_job + ".out")
+            yk_upstream = [s for s in ("w_pert", "w_asym", "legacy_Y") if s in submitted]
+            if not yk_upstream and valid_output(yk_out, 3, npts):
+                print(f"  get_yk_new   {yk_job}.out already exists -- reusing, not resubmitted")
+            else:
+                rai = cfg.get("get_yk_new", f"r_ai_{tag}")
+                if rai:
+                    rai_file = os.path.basename(rai)
+                    copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
+                    make_rai = ""
+                else:
+                    if cfg.order == "NNLO":
+                        die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
+                    rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
+                    make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py ../w_pert/{jobs["w_pert"]}.out '
+                                f'{rai_file} {int(float(ecm))} {vtype} {cfg.pdf} || exit 1\n')
+                _, body = yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai)
+                write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+                sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable {dep_clause(yk_upstream)}'
+                           f'run_get_yk_new_{tag}.sb)')
+                print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
+                submitted.add("get_yk_new")
+
+        # ---- resbos (resNLO): one job per run, never sharded; its grids are staged by the job itself
+        if do_resnlo:
+            rdir = os.path.join(cfg.dest, "resbos")
+            os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+            runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+            for run in runs:
+                rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_main"]),
+                                         ("get_yk_new", yk_job), tlines["resbos"])
+                root_out = os.path.join(cfg.dest, rjob + ".root")
+                rdeps = [s for s in ("get_yk_new", "legacy_main") if s in submitted]
+                if not rdeps and os.path.isfile(root_out):
+                    print(f"  resbos       {rjob}.root already exists -- reusing, not resubmitted")
+                    continue
+                dc = dep_clause(["YK_" + tag if s == "get_yk_new" else s for s in rdeps])
+                sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{rjob}.sb)')
+                print(f"  resbos       {rjob}.in")
+            sub.append("")
+
+        # ---- NLO fixed order: Legacy LTO=2 (asy) + LTO=3 (Y, shared with resNLO) -> resbos,
+        # and Legacy LTO=1 (dsi) alone -> resbos (Y piece = "-"), then hadd the two .root
+        # files -- see README.md "NLO (fixed order)" for why this equals the real-emission
+        # fixed-order cross section.
+        if do_nlo:
+            rdir = os.path.join(cfg.dest, "resbos")
+            os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+            runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+            for run in runs:
+                asy_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_asy"]),
+                                            ("legacy", jobs["legacy_Y"]), tlines["resbos"], suffix="nloasy")
+                dsi_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_dsi"]),
+                                            None, tlines["resbos"], suffix="nlodsi")
+                asy_root = os.path.join(cfg.dest, asy_job + ".root")
+                dsi_root = os.path.join(cfg.dest, dsi_job + ".root")
+                asy_deps = [s for s in ("legacy_asy", "legacy_Y") if s in submitted]
+                dsi_deps = [s for s in ("legacy_dsi",) if s in submitted]
+                asy_reused = not asy_deps and os.path.isfile(asy_root)
+                dsi_reused = not dsi_deps and os.path.isfile(dsi_root)
+                if asy_reused:
+                    print(f"  resbos       {asy_job}.root already exists -- reusing, not resubmitted")
+                else:
+                    sub.append(f'ASY_{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(asy_deps)}'
+                               f'run_{asy_job}.sb)')
+                    print(f"  resbos       {asy_job}.in")
+                if dsi_reused:
+                    print(f"  resbos       {dsi_job}.root already exists -- reusing, not resubmitted")
+                else:
+                    sub.append(f'DSI_{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(dsi_deps)}'
+                               f'run_{dsi_job}.sb)')
+                    print(f"  resbos       {dsi_job}.in")
+
+                hjob = f"{cfg.name}_{tag}_{run}_NLO"
+                hadd_out = os.path.join(cfg.dest, hjob + ".root")
+                if asy_reused and dsi_reused and os.path.isfile(hadd_out):
+                    print(f"  hadd         {hjob}.root already exists -- reusing, not resubmitted")
+                else:
+                    write(os.path.join(rdir, f"run_{hjob}.sb"),
+                          hadd_script(cfg, hjob, f"{asy_job}.root", f"{dsi_job}.root", f"{hjob}.root"), exe=True)
+                    hdeps = ([] if asy_reused else [f"${{ASY_{tag}_{run}}}"]) + \
+                            ([] if dsi_reused else [f"${{DSI_{tag}_{run}}}"])
+                    dc = f'--dependency=afterok:{":".join(hdeps)} --kill-on-invalid-dep=yes ' if hdeps else ""
+                    sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{hjob}.sb)')
+                    print(f"  hadd         {hjob}.root  ({asy_job}.root + {dsi_job}.root)")
+            sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
     write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)
@@ -936,17 +1123,17 @@ def build(cfg, args):
 
 
 # ------------------------------------------------------------------ helper used inside jobs
-def cmd_check(path, per_point, npts):
-    """Exit 0 iff the data lines after the 'Q,qT,y' header line number per_point*npts."""
+def count_data_rows(path):
+    """Rows after the first 'Q,qT,y' header line, or None if the file/header is missing --
+    shared by cmd_check (job scripts' own row-count check) and valid_output (the driver's
+    own reuse/skip check, [campaign] "don't repeat what's already there")."""
     if not os.path.isfile(path):
-        print(f"{path}: file not found")
-        sys.exit(1)
+        return None
     with open(path, "rb") as f:
         while True:
             line = f.readline()
             if not line:
-                print(f"{path}: no 'Q,qT,y' header line")
-                sys.exit(1)
+                return None
             if HDR_RE.match(line):
                 break
         rows, last = 0, b"\n"
@@ -956,7 +1143,23 @@ def cmd_check(path, per_point, npts):
                 break
             rows += buf.count(b"\n")
             last = buf[-1:]
-    rows += 0 if last == b"\n" else 1
+    return rows + (0 if last == b"\n" else 1)
+
+
+def valid_output(path, per_point, npts):
+    """True iff path exists, has a 'Q,qT,y' header, and its row count matches
+    per_point*npts exactly -- used to decide whether a stage's output can be reused
+    instead of resubmitted."""
+    rows = count_data_rows(path)
+    return rows is not None and rows == per_point * npts
+
+
+def cmd_check(path, per_point, npts):
+    """Exit 0 iff the data lines after the 'Q,qT,y' header line number per_point*npts."""
+    rows = count_data_rows(path)
+    if rows is None:
+        print(f"{path}: file not found" if not os.path.isfile(path) else f"{path}: no 'Q,qT,y' header line")
+        sys.exit(1)
     want = int(per_point) * int(npts)
     print(f"{path}: {rows} data lines, expected {want}")
     sys.exit(0 if rows == want else 1)

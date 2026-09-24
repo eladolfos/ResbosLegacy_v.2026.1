@@ -163,6 +163,101 @@ luminosity, output format and named cut sets `runs = atlas, nocuts` with `[cuts.
 (modules, LHAPDF, HOPPET, ROOT paths used inside the generated job scripts — set these if your installs
 differ from the defaults).
 
+### `[campaign] compute`: resNLO, NLO, or both
+
+The driver can build two different physics results from the same grid/campaign; pick one or
+both with `[campaign] compute` (default `resNLO`, so every existing `.ini` without this key
+behaves exactly as before):
+
+```ini
+[campaign]
+compute = resNLO           # default -- the CSS-resummed result (section 3.3's job chain)
+# compute = NLO             # fixed order, via Legacy's own LTO=1/2/3 pieces + resbos + hadd
+# compute = NLO, resNLO     # both in one campaign; legacy_Y (LTO=3) is computed once and shared
+```
+
+See `E201_e605_NLO_resNLO.ini` and `7TeV_WpWm_NLO_resNLO.ini` for worked examples of
+`compute = NLO, resNLO` (copies of `E201_e605_fine.ini`/`7TeV_WpWm_example.ini` with that one
+key added, plus the reuse note below).
+
+#### resNLO (the default workflow)
+
+This is the chain already described in section 3.3: Legacy's `LTO=3` (Y-piece) combines with
+`w_pert`/`w_asym`'s fixed-order pieces in `get_yk_new` into a K-factor ("Yk"/`ykR`) grid, which
+`resbos` reads alongside Legacy's `LTO=0` ("Main data grid" — the CSS-resummed cross section
+itself) to produce weighted events. The physics content is the full CSS-resummed qT spectrum,
+matched to fixed order at large qT via the K-factor — this is "resNLO" (resummed-and-matched
+NLO) in the sense `w321`/Yao's naming uses it, and the result this repository has validated end
+to end against real data (E605, see the E605 campaign `.ini` files' own comments/README history).
+Pieces needed: `w_pert`, `w_asym`, Legacy `LTO=3` and `LTO=0`, `get_yk_new`, one `resbos` run per
+`[resbos] runs` entry.
+
+#### NLO (fixed order, via phase-space slicing)
+
+A genuine **fixed-order** (no resummation) NLO cross section can be built from Legacy alone,
+without `w_pert`/`w_asym`/`get_yk_new` at all, using the standard two-cutoff phase-space-slicing
+method:
+
+- Legacy's Y-piece is *defined* as `Y = FixedOrder(2→3, real emission) − Asymptotic` (the CSS
+  formula's own large-qT expansion) — so by construction `Asymptotic (LTO=2) + Y-piece (LTO=3)
+  = FixedOrder(2→3)`, valid down to some small `qT_Sep` where the asymptotic expansion is an
+  accurate stand-in for the real matrix element.
+- Below `qT_Sep`, the 2→3 real-emission cross section develops a soft/collinear singularity as
+  qT→0; Legacy's `LTO=1` ("DeltaSigma"/`NLO_Sig`) is the regulated singular 2→2-kinematics piece
+  that captures exactly this region (no Y-piece needed there — there is no "large-qT expansion"
+  below the cutoff, the calculation is intrinsically 2→2).
+- Run `resbos` **twice**: once with Main grid = `LTO=2` (Asymptotic) and Y grid = `LTO=3`
+  (Y-piece) — the `qT>qT_Sep` piece — and once with Main grid = `LTO=1` (DeltaSigma) and **no**
+  Y grid at all (the `.in` file's "Y piece grid" field set to `-`) — the `qT<qT_Sep` piece. Add
+  the two resulting event samples with ROOT's `hadd`. The artificial `qT_Sep` dependence
+  introduced by the slicing is designed to cancel between the two pieces in their sum (standard
+  two-cutoff method), so the combined `.root` is a genuine fixed-order NLO result, independent
+  of `qT_Sep` up to residual power corrections.
+
+This is **not** boson-specific (W/Z/A0 all work the same way): `resbos_root.f` figures out which
+physics mode a "Main data grid" file holds by reading an `LTOpt` field from the grid file's *own*
+header (`YUAN_MAIN`, `Read(2,*) ECMC, iBeam, nDummy, LTOpt, iProc`) and sets its internal event
+kinematics from that, not from `Type_V`/`iProc` alone — the boson identity is already baked into
+the grid's own numbers regardless of which LTO produced it. This is exactly the mechanism that
+lets `resbos` accept a `LTO=1`/`LTO=2` grid as a "Main data grid" at all (normally that field is
+always `LTO=0`), and it is what the "run resbos twice + hadd" recipe above relies on.
+
+Pieces needed for Fixed Order (no `w_pert`/`w_asym`/`get_yk_new`):
+
+| Piece | Legacy `LTO` | Role |
+|---|---|---|
+| DeltaSigma (`legacy_dsi`) | `1` | Singular 2→2 piece, `qT < qT_Sep` |
+| Asymptotic (`legacy_asy`) | `2` | Large-qT expansion, paired with the Y-piece for `qT > qT_Sep` |
+| Y-piece (`legacy_Y`) | `3` | `FixedOrder(2→3) − Asymptotic`; **shared with resNLO** if both are requested |
+| `resbos` (asy+Y run) | — | Main=`legacy_asy`, Y=`legacy_Y` → `qT>qT_Sep` events |
+| `resbos` (dsi-alone run) | — | Main=`legacy_dsi`, Y=`-` → `qT<qT_Sep` events |
+| `hadd` | — | Combines the two `.root` files into `<name>_<tag>_<run>_NLO.root` |
+
+`legacy_dsi`/`legacy_asy` reuse the `legacy_Y` template file by default (`patch_stage()`
+overwrites the `LTO` token regardless of what the template starts with) — set `[templates]
+legacy_dsi`/`legacy_asy` only if you need a genuinely different template. `[grids] experimental`
+(ExpCustomGrid mode) does not support `compute = NLO`: fixed order needs a real, gap-free
+`(Q,qT,y)` rectangle the same way resNLO's `resbos` step does (see the "ExpCustomGrid" WARNING below).
+
+**Caveat**: the `header_lines`/`lines_per_point` shape used for `LTO=1`/`LTO=2` (15 header lines,
+1 data line/point, same as `LTO=0`) was derived by reading `legacy_final_vesion/main.for`'s
+write statements, not by running Legacy (no `gfortran` on this machine) — spot-check a real
+`LTO=1`/`LTO=2` output on the HPCC (line counts, `merge_*_array.sb`'s row-count check) before
+trusting a large production run.
+
+### Reusing outputs already in `dest/` (don't repeat what's already computed)
+
+Every stage (`w_pert`, `w_asym`, each Legacy `LTO`, `get_yk_new`, each `resbos` run) checks, before
+generating its shard/submit lines, whether its own output already exists in `dest/` and is valid
+(a Legacy/`w_pert`/`w_asym`/`get_yk_new` `.out` passes the same row-count check its merge job would
+run; a `resbos` run counts as done if `dest/<job>.root` exists). If so, it's printed as "already
+exists -- reusing, not resubmitted" and left out of `submit_all.sh` entirely — only stages that are
+missing or whose upstream inputs actually changed get (re)submitted, and downstream
+`--dependency=afterok:` clauses only reference the jobs actually queued this run. This is what
+makes it cheap to layer `compute = NLO` onto a `dest/` that already has a finished `resNLO` run (or
+vice versa): rerun with `--reuse` and only the genuinely new pieces are queued, `legacy_Y` included
+(shared, so it's computed once total, not once per `compute` value) — see the examples above.
+
 ### Building a grid for a fixed-target campaign
 
 `make_grid_from_data.py` has two modes for building `q_grid.inp`/`y_grid.inp` (`qt_grid.inp` is left
@@ -356,13 +451,18 @@ python3 run_process.py 8TeV_WpWm.ini --submit
 job names that would be longer than 95 characters and grid sets that are not identical in `w_pert`, `w_asym`
 and `legacy`.
 
-Only `W+` and `W-` are wired up in the driver.
+`W+`, `W-` and `A0` (fixed-target photon Drell-Yan, e.g. E605) are wired up end to end in the driver;
+`Z0` is defined in `PROCS` but `get_yk_new.f` still `STOP`s for it (no `convert` factor implemented
+there yet).
 
 ## 4. Repository layout
 
 ```
 run_process.py            driver (prepares a run and writes submit_all.sh)
-7TeV_WpWm_example.ini     example configuration
+7TeV_WpWm_example.ini     example configuration (compute = resNLO, the default)
+7TeV_WpWm_NLO_resNLO.ini  same campaign, compute = NLO, resNLO (fixed order + resummed, see section 3.1)
+E201_e605_fine.ini        E605 fixed-target example (compute = resNLO)
+E201_e605_NLO_resNLO.ini  same campaign, compute = NLO, resNLO
 setup_resbos_legacy.sb    builds the five executables into bin/
 shrds_scripts/            Q-sharding scripts (make_shards / merge_shards / run_*_array / submit_*_array)
 templates/7TeV_WpWm/      source template for the example (.in files, grids; its old executables are not used)
