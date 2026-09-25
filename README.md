@@ -239,6 +239,17 @@ legacy_dsi`/`legacy_asy` only if you need a genuinely different template. `[grid
 (ExpCustomGrid mode) does not support `compute = NLO`: fixed order needs a real, gap-free
 `(Q,qT,y)` rectangle the same way resNLO's `resbos` step does (see the "ExpCustomGrid" WARNING below).
 
+The asy+Y `resbos` run also needs `iYGrid=1` in its `.in` file: `resbos_root.f` picks the Y-grid
+*format* it expects from an `iYGrid` field in `resbos.in` (not by inspecting the file), and every
+`resbos.in` template ships with `iYGrid=2` — the format `get_yk_new` writes (17 header lines, an
+extra `R_Ai` column), tuned for resNLO's own run. Legacy's raw `LTO=3` output is the *older*
+10-column/15-header layout instead (`iYGrid=1`); feeding it to a `resbos.in` still set to
+`iYGrid=2` makes `resbos_root.f` print `Must have 17 comment lines in the Y-Grid file` and exit
+immediately (**exit code 0, no error, no events** — easy to miss). `write_resbos_run()` sets
+`iYGrid=1` automatically whenever the Y grid comes from `legacy/` instead of `get_yk_new/` (i.e.
+only for NLO's asy+Y run), so this is handled for you — mentioned here in case you ever build a
+`resbos.in` by hand for this workflow.
+
 **Caveat**: the `header_lines`/`lines_per_point` shape used for `LTO=1`/`LTO=2` (15 header lines,
 1 data line/point, same as `LTO=0`) was derived by reading `legacy_final_vesion/main.for`'s
 write statements, not by running Legacy (no `gfortran` on this machine) — spot-check a real

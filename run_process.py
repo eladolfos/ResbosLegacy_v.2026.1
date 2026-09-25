@@ -541,6 +541,18 @@ def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=
     put(lines, find(lines, "Main data grid", "main grid"), f"./Resbos_grids/{main_src[1]}.out")
     put(lines, find(lines, "Y piece grid", "Y grid"),
         f"./Resbos_grids/{y_src[1]}.out" if y_src else "-")
+    if y_src and y_src[0] == "legacy":
+        # NLO's asy+Y run feeds Legacy's raw LTO=3 output directly (10 columns, 15 header
+        # lines: 'Q,qT,y, Singular (L0,A3), Pert. (L0,A3,A1,A2,A4)', main.for ~1872) --
+        # resbos_root.f's iYGrid selects the Y-grid *format* it expects (read from resbos.in,
+        # not auto-detected from the file): iYGrid=1 is exactly this raw 15-header/10-column
+        # layout; iYGrid=2 (what every resbos.in template ships with, tuned for resNLO) is
+        # get_yk_new's newer 17-header/11-column format with the extra R_Ai columns appended
+        # -- feeding it a raw Legacy file makes resbos_root.f print "Must have 17 comment
+        # lines in the Y-Grid file" and Call Exit (silently, exit code 0, no events). Force
+        # iYGrid=1 only for this run; resNLO's own run (y_src=("get_yk_new", ...)) keeps
+        # whatever the template already has.
+        set_token(lines, find(lines, "iYG", "iYGrid"), 3, "1")
     for key, marker in (("lepton", "Cuts(1)"), ("mass_qt_y", "Cuts(2)"), ("mt_met", "Cuts(3)")):
         v = cfg.get(sec, key)
         if v:
