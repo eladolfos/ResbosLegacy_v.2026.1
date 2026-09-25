@@ -623,7 +623,8 @@ def resbos_add(cfg, args):
                 + "\n       ".join(missing))
         print(f"\n== {vtype}")
         for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", main_job), ("get_yk_new", yk_job), resbos_lines)
+            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", main_job), ("get_yk_new", yk_job),
+                                     resbos_lines, suffix="resNLO")
             print(f"  resbos       {rjob}.in")
             to_submit.append((rdir, f"run_{rjob}.sb", rjob))
     if args.submit:
@@ -865,7 +866,7 @@ def build_points(cfg, args):
         runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
         for run in runs:
             rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", combined["legacy_main"]),
-                                     ("get_yk_new", yk_job), tlines["resbos"])
+                                     ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
             sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:'
                        f'${merge_ids["legacy_main"]} --kill-on-invalid-dep=yes run_{rjob}.sb)')
             print(f"  resbos       {rjob}.in")
@@ -1098,7 +1099,7 @@ def build(cfg, args):
             runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
             for run in runs:
                 rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_main"]),
-                                         ("get_yk_new", yk_job), tlines["resbos"])
+                                         ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
                 root_out = os.path.join(cfg.dest, rjob + ".root")
                 rdeps = [s for s in ("get_yk_new", "legacy_main") if s in submitted]
                 if not rdeps and os.path.isfile(root_out):

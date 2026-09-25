@@ -190,7 +190,9 @@ matched to fixed order at large qT via the K-factor — this is "resNLO" (resumm
 NLO) in the sense `w321`/Yao's naming uses it, and the result this repository has validated end
 to end against real data (E605, see the E605 campaign `.ini` files' own comments/README history).
 Pieces needed: `w_pert`, `w_asym`, Legacy `LTO=3` and `LTO=0`, `get_yk_new`, one `resbos` run per
-`[resbos] runs` entry.
+`[resbos] runs` entry, written as `<name>_<tag>_<run>_resNLO.root` — the same `_resNLO`/`_NLO`
+suffix distinguishes the two workflows' final `.root` files whenever both are computed for the
+same `[resbos] runs` name.
 
 #### NLO (fixed order, via phase-space slicing)
 
