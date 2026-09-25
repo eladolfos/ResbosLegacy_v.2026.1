@@ -146,6 +146,31 @@ def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
         l2 = find(lines, "ECM,LTO", "ECM,LTO")
         set_token(lines, l2, 0, ecm if "." in ecm else ecm + ".0")
         set_token(lines, l2, 1, LTO_BY_STAGE[stage])
+        if stage == "legacy_dsi":
+            # res.for's SetC1_4: LTO=1 (DeltaSigma) hard-STOPs in main.for ("THIS ONLY WORKS
+            # FOR IFLAG_C3 = 1") unless the scale choice is the canonical one (IFLAG_C3=1).
+            # IFLAG_C3=99 (custom C1/B0,C2,C3/B0) is only safe to auto-convert when its values
+            # are numerically identical to canonical (C1/B0=C2=C3/B0=1 -> C1=B0,C2=1,C3=B0,C4=1
+            # either way) -- otherwise forcing IFLAG_C3=1 would silently give legacy_dsi a
+            # different renormalization/factorization scale than legacy_asy/legacy_Y use,
+            # breaking the qT_Sep cancellation between them (see README.md's NLO section).
+            l3 = find(lines, "IFLAG_C3", "IFLAG_C3")
+            toks = [t.strip() for t in lines[l3].split(">", 1)[0].split(",")]
+            iflag_c3, c_vals = toks[1], toks[2:5]
+            if iflag_c3 != "1":
+                same_as_canonical = iflag_c3 == "99" and all(
+                    float(t.lower().replace("d", "e")) == 1.0 for t in c_vals)
+                if same_as_canonical:
+                    set_token(lines, l3, 1, "1")
+                else:
+                    die(f"legacy_dsi (LTO=1) needs IFLAG_C3=1 (Legacy's res.for STOPs otherwise: "
+                        f"'THIS ONLY WORKS FOR IFLAG_C3 = 1'), but the legacy_dsi template has "
+                        f"IFLAG_C3={iflag_c3} with C1/B0,C2,C3/B0={','.join(c_vals)}, not "
+                        f"numerically identical to canonical (C1/B0=C2=C3/B0=1) -- auto-forcing it "
+                        f"would silently run DeltaSigma at a different scale than legacy_asy/"
+                        f"legacy_Y, breaking the qT_Sep cancellation between them. Point "
+                        f"[templates] legacy_dsi at a template using IFLAG_C3=1 (or IFLAG_C3=99 "
+                        f"with C1/B0=C2=C3/B0=1), or drop 'NLO' from [campaign] compute.")
         put(lines, find(lines, "Type_V", "Type_V"), vtype)
         put(lines, find(lines, "Evolved PDF file", "PDF"), "lha_" + cfg.pdf)
         if cfg.get("legacy", "bmax"):
