@@ -194,6 +194,20 @@ C which is not implemented -- stop rather than silently use 1.0D0.
              stop
            endif
            convert_0=1.0D0
+         elseif(itype.eq.'Z0') then
+CCPY Z0 here is the COMBINED (JZ_TYPE=0) grid, not a separate ZU/ZD run:
+C unlike ZU/ZD alone it mixes u-type and d-type quark contributions that
+C carry DIFFERENT EW couplings (Facu vs Facd), so there is no single
+C well-defined convert factor for it -- same class of gap as A0's NNLO
+C case above, not simply reusing Facu or Facd. convert/convert_0 only
+C feed into the NNLO branch below (a_L0=a_L02*convert etc.); at NLO
+C they are never used, so this is a harmless placeholder there.
+           if (iorder=="NNLO") then
+             Print*,' Z0 at NNLO has no convert factor implemented',
+     >         ' (it mixes ZU/ZD, each with its own EW coupling)!'
+             stop
+           endif
+           convert_0=1.0D0
          else
            Print*,' convert is not assigned to this Boson yet!'
            stop
