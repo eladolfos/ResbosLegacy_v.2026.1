@@ -3,8 +3,8 @@
 run_process.py -- copy a template ResBos-Legacy folder to a new place, put the
 right energy / PDF / boson in every .in file, and chain the jobs with shards.
 
-    python3 run_process.py 7TeV_WpWm_example.ini            # prepare <dest>, write <dest>/submit_all.sh
-    python3 run_process.py 7TeV_WpWm_example.ini --submit   # ... and run it (on the HPCC login node)
+    python3 run_process.py Examples/7TeV_WpWm_example.ini            # prepare <dest>, write <dest>/submit_all.sh
+    python3 run_process.py Examples/7TeV_WpWm_example.ini --submit   # ... and run it (on the HPCC login node)
 
 The .ini names a SOURCE folder that holds get_yk_new/ legacy/ resbos/ w_asym/ w_pert/
 (e.g. templates/7TeV_WpWm) and a DEST folder.  Only what a run needs is copied to
@@ -26,9 +26,12 @@ Per boson:
     legacy LTO=3 (Y piece) --/                            +--> resbos  (never sharded:
     legacy LTO=0 (main grid) -----------------------------/             it is a VEGAS MC)
 
-w_pert, w_asym and legacy are split along Q with the scripts of shrds_scripts/
-(make_shards.py, merge_shards.py, run_*_array.sb, merge_*_array.sb, submit_*_array.sh),
-copied into each folder with the executable name and the header length of that code.
+w_pert, w_asym and legacy are split along Q with the scripts of scripts/
+(make_shards.py, merge_shards.py, run_*_array.sb, merge_*_array.sb, submit_*_array.sh,
+make_grid_from_data.py), copied into each folder with the executable name and the header
+length of that code. [paths] scripts says where this folder is -- run_process.py itself is
+the only file you need to copy elsewhere; point [paths] scripts (and [paths] source) back at
+wherever scripts/ (and the source template) actually live.
 """
 import argparse
 import configparser
@@ -238,10 +241,17 @@ def md5(path):
     return h.hexdigest()
 
 
-def check_jobname(job):
+def check_jobname(job, multi_energy=False):
     name = f"{job}_shards/{job}_shard00"      # Fortran job names are character*100
     if len(name) > 95:
-        die(f"'{name}' is {len(name)} chars; the codes truncate at 100. Shorten [campaign] name")
+        where = "[energies] prefix" if multi_energy else "[campaign] name"
+        die(f"'{name}' is {len(name)} chars; the codes truncate at 100. Shorten {where}")
+
+
+def bash_token(s):
+    """Sanitize an [energies] prefix into a valid bash identifier fragment, for the
+    M_*/YK_*/ASY_*/DSI_* dependency-tracking variable names in submit_all.sh (see build())."""
+    return re.sub(r"[^A-Za-z0-9]", "_", s.upper())
 
 
 # ------------------------------------------------------------------ config
@@ -256,13 +266,16 @@ class Cfg:
         self.rel = lambda p: os.path.abspath(os.path.join(base, os.path.expanduser(p)))
         self.src = self.rel(self.req("paths", "source"))
         self.dest = self.rel(self.req("paths", "dest"))
-        self.shard_scripts = self.rel(self.get("paths", "shard_scripts", os.path.join(HERE, "shrds_scripts")))
+        self.scripts = self.rel(self.get("paths", "scripts", os.path.join(HERE, "scripts")))
         self.stage = self.get("paths", "stage_outputs", "link")      # how a job receives upstream outputs
         if self.stage not in ("link", "copy"):
             die("[paths] stage_outputs must be 'link' or 'copy'")
-        self.name = self.req("campaign", "name")
-        self.ecm = self.req("campaign", "ecm")
-        float(self.ecm)
+        # [energies]: run the SAME campaign (processes/pdf/order/templates/grids/shards/
+        # [legacy]/[resbos] all shared) at several collider energies from one .ini, each with
+        # its own file prefix so outputs never collide -- see _parse_energies(). Absent: single
+        # energy from [campaign] name/ecm, unchanged behaviour (self.energies has one entry).
+        self.energies = self._parse_energies()
+        self.name, self.ecm = self.energies[0].name, self.energies[0].ecm
         self.pdf = self.req("campaign", "pdf")
         self.order = self.req("campaign", "order").upper()
         if self.order not in ("NLO", "NNLO"):
@@ -327,6 +340,39 @@ class Cfg:
             self.gen_y_col = int(self.get("grids", "y_col", "1"))
             self.gen_y_spacing = self.get("grids", "y_spacing", "linear")
 
+    def _parse_energies(self):
+        """[energies]: '<label> = <ecm_GeV>, <file_prefix>' per line, one per energy to run
+        this campaign at (same [paths]/[templates]/[grids]/[shards]/[legacy]/[resbos] for all of
+        them). Requires [campaign] name/ecm to be absent -- each energy supplies its own. Falls
+        back to a single energy from [campaign] name/ecm when the section is absent (unchanged
+        single-energy behaviour, self.energies has exactly one entry)."""
+        from types import SimpleNamespace
+        if not self.cp.has_section("energies"):
+            ecm = self.req("campaign", "ecm")
+            float(ecm)
+            return [SimpleNamespace(label=None, ecm=ecm, name=self.req("campaign", "name"))]
+        if self.cp.has_option("campaign", "ecm") or self.cp.has_option("campaign", "name"):
+            die("[energies] is set -- remove [campaign] ecm/name (each energy supplies its own "
+                "ecm and file prefix as '<label> = <ecm_GeV>, <file_prefix>' under [energies])")
+        energies, seen = [], set()
+        for label, value in self.cp.items("energies"):
+            parts = [p.strip() for p in value.split(",")]
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                die(f"[energies] {label} = {value!r}: expected '<ecm_GeV>, <file_prefix>'")
+            ecm, name = parts
+            try:
+                float(ecm)
+            except ValueError:
+                die(f"[energies] {label}: '{ecm}' is not a number (GeV)")
+            if name in seen:
+                die(f"[energies]: prefix '{name}' is used by more than one energy -- "
+                    f"prefixes must be unique so their outputs don't collide in [paths] dest")
+            seen.add(name)
+            energies.append(SimpleNamespace(label=label, ecm=ecm, name=name))
+        if not energies:
+            die("[energies] section is present but empty")
+        return energies
+
     def get(self, sec, key, default=None):
         return self.cp.get(sec, key, fallback=default)
 
@@ -352,9 +398,9 @@ class Cfg:
 
 # ------------------------------------------------------------------ pieces
 def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean_shards):
-    """Copy shrds_scripts/ into dest/<folder>, renaming w_asym -> label (exe for the srun line)."""
+    """Copy scripts/ into dest/<folder>, renaming w_asym -> label (exe for the srun line)."""
     d = os.path.join(cfg.dest, folder)
-    sd = cfg.shard_scripts
+    sd = cfg.scripts
 
     def conv(text):
         text = text.replace("srun ./w_asym", "srun ./@EXE@").replace("w_asym", label)
@@ -363,14 +409,14 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean
     def read(name):
         p = os.path.join(sd, name)
         if not os.path.isfile(p):
-            die(f"{p} not found (set [paths] shard_scripts)")
+            die(f"{p} not found (set [paths] scripts)")
         return open(p).read()
 
     write(os.path.join(d, "make_shards.py"), conv(read("make_shards.py")), exe=True)
     ms = conv(read("merge_shards.py"))
     ms, n = re.subn(r"(?m)^HEADER_LINES = \d+.*$", f"HEADER_LINES = {header_lines}", ms)
     if n != 1:
-        die("could not find 'HEADER_LINES = N' in shrds_scripts/merge_shards.py")
+        die("could not find 'HEADER_LINES = N' in scripts/merge_shards.py")
     write(os.path.join(d, "merge_shards.py"), ms, exe=True)
     write(os.path.join(d, f"run_{label}_array.sb"), conv(read("run_w_asym_array.sb")), exe=True)
     # after merging, verify the row count (legacy Y-piece files have 3 lines per point, the rest 1)
@@ -611,22 +657,28 @@ def resbos_add(cfg, args):
     copy(exe_src, os.path.join(rdir, "resbos_root"), exe=True)
     runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
     to_submit = []
-    for vtype in cfg.procs:
-        tag, _ = PROCS[vtype]
-        main_job = f"{cfg.name}_legacy_{tag}_main"
-        yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
-        main_out = os.path.join(cfg.dest, "legacy", main_job + ".out")
-        yk_out = os.path.join(cfg.dest, "get_yk_new", yk_job + ".out")
-        missing = [p for p in (main_out, yk_out) if not os.path.isfile(p)]
-        if missing:
-            die("missing output(s) of the main campaign, run (and wait for) it first:\n       "
-                + "\n       ".join(missing))
-        print(f"\n== {vtype}")
-        for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", main_job), ("get_yk_new", yk_job),
-                                     resbos_lines, suffix="resNLO")
-            print(f"  resbos       {rjob}.in")
-            to_submit.append((rdir, f"run_{rjob}.sb", rjob))
+    multi_energy = len(cfg.energies) > 1
+    for energy in cfg.energies:
+        cfg.name, cfg.ecm = energy.name, energy.ecm
+        if multi_energy:
+            elabel = f" ({energy.label})" if energy.label else ""
+            print(f"\n### energy{elabel}: {energy.ecm} GeV -- prefix {energy.name}")
+        for vtype in cfg.procs:
+            tag, _ = PROCS[vtype]
+            main_job = f"{cfg.name}_legacy_{tag}_main"
+            yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
+            main_out = os.path.join(cfg.dest, "legacy", main_job + ".out")
+            yk_out = os.path.join(cfg.dest, "get_yk_new", yk_job + ".out")
+            missing = [p for p in (main_out, yk_out) if not os.path.isfile(p)]
+            if missing:
+                die("missing output(s) of the main campaign, run (and wait for) it first:\n       "
+                    + "\n       ".join(missing))
+            print(f"\n== {vtype}")
+            for run in runs:
+                rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", main_job), ("get_yk_new", yk_job),
+                                         resbos_lines, suffix="resNLO")
+                print(f"  resbos       {rjob}.in")
+                to_submit.append((rdir, f"run_{rjob}.sb", rjob))
     if args.submit:
         if not shutil.which("sbatch"):
             die("sbatch not found: use --submit on the HPCC login node")
@@ -802,75 +854,83 @@ def build_points(cfg, args):
               f"+ a normal [templates] campaign, e.g. E201_e605_full.ini for E605).")
 
     sub = ["#!/bin/bash", "set -e", *timing_header_lines(cfg)]
-    ecm = cfg.ecm
-    for vtype in cfg.procs:
-        tag, jw = PROCS[vtype]
-        print(f"\n== {vtype}")
-        combined, merge_ids = {}, {}
-        for stage in ("w_pert", "w_asym", "legacy_Y", "legacy_main"):
-            folder, exe, _, hdr, k = STAGES[stage]
-            prefix = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
-                      f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}")
-            for i, (y_val, q_val) in enumerate(points, start=1):
-                pt = str(i).zfill(width)
-                job = f"{prefix}_pt{pt}"
-                if len(job) > 95:
-                    die(f"'{job}' is {len(job)} chars; the codes truncate at 100. "
-                        f"Shorten [campaign] name")
-                lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
-                q_rel, qt_rel, y_rel = grid_paths(lines)
-                set_active(lines, (1, nqt, 1, 1, 1, 1, 1, 1, 1), (1, nqt, 1, 1, 1, 1, 1, 1, 1))
-                pdir = os.path.join(cfg.dest, folder, "points", f"pt{pt}")
-                write(os.path.join(pdir, q_rel), q_val + "\n")
-                write(os.path.join(pdir, y_rel), y_val + "\n")
-                copy(os.path.join(cfg.src, folder, qt_rel), os.path.join(pdir, qt_rel))
-                write(os.path.join(pdir, job + ".in"), "".join(lines))
-            fdir = os.path.join(cfg.dest, folder)
-            aj, abody = points_array_script(cfg, exe, prefix, width, npts)
-            write(os.path.join(fdir, f"run_{aj}.sb"), abody, exe=True)
-            mj, mbody = points_merge_script(cfg, prefix, width, npts, hdr, k, nqt)
-            write(os.path.join(fdir, f"run_{mj}.sb"), mbody, exe=True)
-            var = f"M_{stage.upper()}_{tag}"
-            merge_ids[stage] = var
-            combined[stage] = f"{prefix}_combined"       # basename (no .out) of the merged file
-            sub.append('STAGE_T0=$(date +%s)')
-            sub.append(f'ARRAY_ID=$(cd "{fdir}" && sbatch --parsable run_{aj}.sb)')
-            sub.append(f'{var}=$(cd "{fdir}" && sbatch --parsable --dependency=afterok:$ARRAY_ID '
-                       f'run_{mj}.sb "$STAGE_T0")')
-            print(f"  {stage:<12} {npts} points -> {prefix}_combined.out")
+    multi_energy = len(cfg.energies) > 1
+    for energy in cfg.energies:
+        cfg.name, cfg.ecm = energy.name, energy.ecm
+        etok = bash_token(energy.name) + "_" if multi_energy else ""
+        if multi_energy:
+            elabel = f" ({energy.label})" if energy.label else ""
+            print(f"\n### energy{elabel}: {energy.ecm} GeV -- prefix {energy.name}")
+            sub.append(f'echo "=== {energy.name}: {energy.ecm} GeV{elabel} ==="')
+        ecm = cfg.ecm
+        for vtype in cfg.procs:
+            tag, jw = PROCS[vtype]
+            print(f"\n== {vtype}")
+            combined, merge_ids = {}, {}
+            for stage in ("w_pert", "w_asym", "legacy_Y", "legacy_main"):
+                folder, exe, _, hdr, k = STAGES[stage]
+                prefix = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
+                          f"{cfg.name}_legacy_{tag}_{'Y' if stage == 'legacy_Y' else 'main'}")
+                for i, (y_val, q_val) in enumerate(points, start=1):
+                    pt = str(i).zfill(width)
+                    job = f"{prefix}_pt{pt}"
+                    if len(job) > 95:
+                        die(f"'{job}' is {len(job)} chars; the codes truncate at 100. "
+                            f"Shorten {'[energies] prefix' if multi_energy else '[campaign] name'}")
+                    lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
+                    q_rel, qt_rel, y_rel = grid_paths(lines)
+                    set_active(lines, (1, nqt, 1, 1, 1, 1, 1, 1, 1), (1, nqt, 1, 1, 1, 1, 1, 1, 1))
+                    pdir = os.path.join(cfg.dest, folder, "points", f"pt{pt}")
+                    write(os.path.join(pdir, q_rel), q_val + "\n")
+                    write(os.path.join(pdir, y_rel), y_val + "\n")
+                    copy(os.path.join(cfg.src, folder, qt_rel), os.path.join(pdir, qt_rel))
+                    write(os.path.join(pdir, job + ".in"), "".join(lines))
+                fdir = os.path.join(cfg.dest, folder)
+                aj, abody = points_array_script(cfg, exe, prefix, width, npts)
+                write(os.path.join(fdir, f"run_{aj}.sb"), abody, exe=True)
+                mj, mbody = points_merge_script(cfg, prefix, width, npts, hdr, k, nqt)
+                write(os.path.join(fdir, f"run_{mj}.sb"), mbody, exe=True)
+                var = f"M_{etok}{stage.upper()}_{tag}"
+                merge_ids[stage] = var
+                combined[stage] = f"{prefix}_combined"       # basename (no .out) of the merged file
+                sub.append('STAGE_T0=$(date +%s)')
+                sub.append(f'ARRAY_ID=$(cd "{fdir}" && sbatch --parsable run_{aj}.sb)')
+                sub.append(f'{var}=$(cd "{fdir}" && sbatch --parsable --dependency=afterok:$ARRAY_ID '
+                           f'run_{mj}.sb "$STAGE_T0")')
+                print(f"  {stage:<12} {npts} points -> {prefix}_combined.out")
 
-        # ---- get_yk_new: same as build(), but fed the merged _combined.out files
-        yk_dir = os.path.join(cfg.dest, "get_yk_new")
-        rai = cfg.get("get_yk_new", f"r_ai_{tag}")
-        if rai:
-            rai_file = os.path.basename(rai)
-            copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
-            make_rai = ""
-        else:
-            if cfg.order == "NNLO":
-                die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
-            rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
-            write_rect_rai(os.path.join(yk_dir, rai_file), q_vals, y_vals, qt_vals,
-                            int(float(ecm)), vtype, cfg.pdf)
-            make_rai = ""
-        yk_job, body = yk_script(cfg, tag, vtype, combined, total_pts, rai_file, make_rai)
-        write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
-        sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
-                   f'${merge_ids["w_pert"]}:${merge_ids["w_asym"]}:${merge_ids["legacy_Y"]} '
-                   f'--kill-on-invalid-dep=yes run_get_yk_new_{tag}.sb)')
-        print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
+            # ---- get_yk_new: same as build(), but fed the merged _combined.out files
+            yk_dir = os.path.join(cfg.dest, "get_yk_new")
+            rai = cfg.get("get_yk_new", f"r_ai_{tag}")
+            if rai:
+                rai_file = os.path.basename(rai)
+                copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
+                make_rai = ""
+            else:
+                if cfg.order == "NNLO":
+                    die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
+                rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
+                write_rect_rai(os.path.join(yk_dir, rai_file), q_vals, y_vals, qt_vals,
+                                int(float(ecm)), vtype, cfg.pdf)
+                make_rai = ""
+            yk_job, body = yk_script(cfg, tag, vtype, combined, total_pts, rai_file, make_rai)
+            write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+            sub.append(f'YK_{etok}{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
+                       f'${merge_ids["w_pert"]}:${merge_ids["w_asym"]}:${merge_ids["legacy_Y"]} '
+                       f'--kill-on-invalid-dep=yes run_get_yk_new_{tag}.sb)')
+            print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
 
-        # ---- resbos: one job per [resbos] run, fed the merged legacy_main + the Yk grid above
-        rdir = os.path.join(cfg.dest, "resbos")
-        os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
-        runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
-        for run in runs:
-            rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", combined["legacy_main"]),
-                                     ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
-            sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{tag}:'
-                       f'${merge_ids["legacy_main"]} --kill-on-invalid-dep=yes run_{rjob}.sb)')
-            print(f"  resbos       {rjob}.in")
-        sub.append("")
+            # ---- resbos: one job per [resbos] run, fed the merged legacy_main + the Yk grid above
+            rdir = os.path.join(cfg.dest, "resbos")
+            os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+            runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+            for run in runs:
+                rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", combined["legacy_main"]),
+                                         ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
+                sub.append(f'(cd "{rdir}" && sbatch --parsable --dependency=afterok:$YK_{etok}{tag}:'
+                           f'${merge_ids["legacy_main"]} --kill-on-invalid-dep=yes run_{rjob}.sb)')
+                print(f"  resbos       {rjob}.in")
+            sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
     write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)
@@ -880,6 +940,21 @@ def build_points(cfg, args):
         if not shutil.which("sbatch"):
             die("sbatch not found: use --submit on the HPCC login node")
         subprocess.check_call(["bash", os.path.join(cfg.dest, "submit_all.sh")])
+
+
+def load_mgfd(cfg):
+    """Load scripts/make_grid_from_data.py from [paths] scripts by file path (not a plain
+    `import`, which would only work if it happened to sit next to run_process.py) -- so
+    run_process.py stays the only file you need to copy elsewhere; [paths] scripts says where
+    the rest (this script, the shard scripts) actually lives."""
+    import importlib.util
+    path = os.path.join(cfg.scripts, "make_grid_from_data.py")
+    if not os.path.isfile(path):
+        die(f"{path} not found (set [paths] scripts)")
+    spec = importlib.util.spec_from_file_location("make_grid_from_data", path)
+    mgfd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mgfd)
+    return mgfd
 
 
 # ------------------------------------------------------------------ main flow
@@ -892,7 +967,7 @@ def generate_grid_files(cfg, tlines):
     templates then -- see tlines' conditional keys in build()); legacy_dsi/legacy_asy
     don't need their own entry since their grid paths come from the same file as
     legacy_Y by default (patch_stage() only rewrites the LTO token, not the grid paths)."""
-    import make_grid_from_data as mgfd
+    mgfd = load_mgfd(cfg)
     from types import SimpleNamespace
 
     q_ns = SimpleNamespace(q_min=float(cfg.gen_q_min) if cfg.gen_q_min else None,
@@ -1024,137 +1099,145 @@ def build(cfg, args):
            '  echo "$out" >&2',
            "  echo \"$out\" | sed -n 's/^Submitted merge job \\([0-9]*\\).*/\\1/p'",
            "}", ""]
-    ecm = cfg.ecm
-    for vtype in cfg.procs:
-        tag, jw = PROCS[vtype]
-        print(f"\n== {vtype}")
-        jobs, merge_ids, submitted = {}, {}, set()
-        for stage in active_stages:
-            folder, exe, label, hdr, k = STAGES[stage]
-            lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
-            job = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
-                   f"{cfg.name}_legacy_{tag}_{LEGACY_SUFFIX[stage]}")
-            set_active(lines, act, full)
-            check_jobname(job)
-            inpath = os.path.join(cfg.dest, folder, job + ".in")
-            if os.path.isdir(os.path.join(cfg.dest, folder, job + "_shards")) and \
-                    (not os.path.isfile(inpath) or open(inpath).read() != "".join(lines)):
-                # submit_*_array.sh reuses existing shards, which would keep the OLD values
-                die(f"{folder}/{job}_shards/ exists from an earlier input and {job}.in changed; "
-                    f"remove that folder (or use a new dest) so the shards are regenerated")
-            write(inpath, "".join(lines))
-            jobs[stage] = job
-            out_path = os.path.join(cfg.dest, folder, job + ".out")
-            if valid_output(out_path, k, npts):
-                print(f"  {stage:<12} {job}.out already exists ({k * npts} lines) -- reusing, not resubmitted")
-                continue
-            submitted.add(stage)
-            n = cfg.shards(stage)
-            var = f"M_{stage.upper()}_{tag}"
-            merge_ids[stage] = var
-            sub.append(f'{var}=$(run_shards "{os.path.join(cfg.dest, folder)}" submit_{label}_array.sh {job} {n})')
-            print(f"  {stage:<12} {job}.in   {n} shard(s)")
-
-        def dep_clause(dep_vars):
-            """--dependency=... clause built only from stages actually (re)submitted this
-            run (an unset bash var in --dependency=afterok:$VAR would break sbatch). Entries
-            are stage names (resolved through merge_ids) or bare bash variable names
-            (e.g. "YK_Wp") used as-is."""
-            names = [merge_ids[s] if s in merge_ids else s for s in dep_vars]
-            return (f'--dependency=afterok:{":".join("${" + n + "}" for n in names)} '
-                    f'--kill-on-invalid-dep=yes ') if names else ""
-
-        # ---- get_yk_new (resNLO only)
-        yk_job = None
-        if do_resnlo:
-            yk_dir = os.path.join(cfg.dest, "get_yk_new")
-            yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
-            yk_out = os.path.join(yk_dir, yk_job + ".out")
-            yk_upstream = [s for s in ("w_pert", "w_asym", "legacy_Y") if s in submitted]
-            if not yk_upstream and valid_output(yk_out, 3, npts):
-                print(f"  get_yk_new   {yk_job}.out already exists -- reusing, not resubmitted")
-            else:
-                rai = cfg.get("get_yk_new", f"r_ai_{tag}")
-                if rai:
-                    rai_file = os.path.basename(rai)
-                    copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
-                    make_rai = ""
-                else:
-                    if cfg.order == "NNLO":
-                        die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
-                    rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
-                    make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py ../w_pert/{jobs["w_pert"]}.out '
-                                f'{rai_file} {int(float(ecm))} {vtype} {cfg.pdf} || exit 1\n')
-                _, body = yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai)
-                write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
-                sub.append(f'YK_{tag}=$(cd "{yk_dir}" && sbatch --parsable {dep_clause(yk_upstream)}'
-                           f'run_get_yk_new_{tag}.sb)')
-                print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
-                submitted.add("get_yk_new")
-
-        # ---- resbos (resNLO): one job per run, never sharded; its grids are staged by the job itself
-        if do_resnlo:
-            rdir = os.path.join(cfg.dest, "resbos")
-            os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
-            runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
-            for run in runs:
-                rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_main"]),
-                                         ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
-                root_out = os.path.join(cfg.dest, rjob + ".root")
-                rdeps = [s for s in ("get_yk_new", "legacy_main") if s in submitted]
-                if not rdeps and os.path.isfile(root_out):
-                    print(f"  resbos       {rjob}.root already exists -- reusing, not resubmitted")
+    multi_energy = len(cfg.energies) > 1
+    for energy in cfg.energies:
+        cfg.name, cfg.ecm = energy.name, energy.ecm
+        etok = bash_token(energy.name) + "_" if multi_energy else ""
+        if multi_energy:
+            elabel = f" ({energy.label})" if energy.label else ""
+            print(f"\n### energy{elabel}: {energy.ecm} GeV -- prefix {energy.name}")
+            sub.append(f'echo "=== {energy.name}: {energy.ecm} GeV{elabel} ==="')
+        ecm = cfg.ecm
+        for vtype in cfg.procs:
+            tag, jw = PROCS[vtype]
+            print(f"\n== {vtype}")
+            jobs, merge_ids, submitted = {}, {}, set()
+            for stage in active_stages:
+                folder, exe, label, hdr, k = STAGES[stage]
+                lines = patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm)
+                job = (f"{cfg.name}_{stage}_{tag}" if stage in ("w_pert", "w_asym") else
+                       f"{cfg.name}_legacy_{tag}_{LEGACY_SUFFIX[stage]}")
+                set_active(lines, act, full)
+                check_jobname(job, multi_energy)
+                inpath = os.path.join(cfg.dest, folder, job + ".in")
+                if os.path.isdir(os.path.join(cfg.dest, folder, job + "_shards")) and \
+                        (not os.path.isfile(inpath) or open(inpath).read() != "".join(lines)):
+                    # submit_*_array.sh reuses existing shards, which would keep the OLD values
+                    die(f"{folder}/{job}_shards/ exists from an earlier input and {job}.in changed; "
+                        f"remove that folder (or use a new dest) so the shards are regenerated")
+                write(inpath, "".join(lines))
+                jobs[stage] = job
+                out_path = os.path.join(cfg.dest, folder, job + ".out")
+                if valid_output(out_path, k, npts):
+                    print(f"  {stage:<12} {job}.out already exists ({k * npts} lines) -- reusing, not resubmitted")
                     continue
-                dc = dep_clause(["YK_" + tag if s == "get_yk_new" else s for s in rdeps])
-                sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{rjob}.sb)')
-                print(f"  resbos       {rjob}.in")
-            sub.append("")
+                submitted.add(stage)
+                n = cfg.shards(stage)
+                var = f"M_{etok}{stage.upper()}_{tag}"
+                merge_ids[stage] = var
+                sub.append(f'{var}=$(run_shards "{os.path.join(cfg.dest, folder)}" submit_{label}_array.sh {job} {n})')
+                print(f"  {stage:<12} {job}.in   {n} shard(s)")
 
-        # ---- NLO fixed order: Legacy LTO=2 (asy) + LTO=3 (Y, shared with resNLO) -> resbos,
-        # and Legacy LTO=1 (dsi) alone -> resbos (Y piece = "-"), then hadd the two .root
-        # files -- see README.md "NLO (fixed order)" for why this equals the real-emission
-        # fixed-order cross section.
-        if do_nlo:
-            rdir = os.path.join(cfg.dest, "resbos")
-            os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
-            runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
-            for run in runs:
-                asy_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_asy"]),
-                                            ("legacy", jobs["legacy_Y"]), tlines["resbos"], suffix="nloasy")
-                dsi_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_dsi"]),
-                                            None, tlines["resbos"], suffix="nlodsi")
-                asy_root = os.path.join(cfg.dest, asy_job + ".root")
-                dsi_root = os.path.join(cfg.dest, dsi_job + ".root")
-                asy_deps = [s for s in ("legacy_asy", "legacy_Y") if s in submitted]
-                dsi_deps = [s for s in ("legacy_dsi",) if s in submitted]
-                asy_reused = not asy_deps and os.path.isfile(asy_root)
-                dsi_reused = not dsi_deps and os.path.isfile(dsi_root)
-                if asy_reused:
-                    print(f"  resbos       {asy_job}.root already exists -- reusing, not resubmitted")
-                else:
-                    sub.append(f'ASY_{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(asy_deps)}'
-                               f'run_{asy_job}.sb)')
-                    print(f"  resbos       {asy_job}.in")
-                if dsi_reused:
-                    print(f"  resbos       {dsi_job}.root already exists -- reusing, not resubmitted")
-                else:
-                    sub.append(f'DSI_{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(dsi_deps)}'
-                               f'run_{dsi_job}.sb)')
-                    print(f"  resbos       {dsi_job}.in")
+            def dep_clause(dep_vars):
+                """--dependency=... clause built only from stages actually (re)submitted this
+                run (an unset bash var in --dependency=afterok:$VAR would break sbatch). Entries
+                are stage names (resolved through merge_ids) or bare bash variable names
+                (e.g. "YK_Wp") used as-is."""
+                names = [merge_ids[s] if s in merge_ids else s for s in dep_vars]
+                return (f'--dependency=afterok:{":".join("${" + n + "}" for n in names)} '
+                        f'--kill-on-invalid-dep=yes ') if names else ""
 
-                hjob = f"{cfg.name}_{tag}_{run}_NLO"
-                hadd_out = os.path.join(cfg.dest, hjob + ".root")
-                if asy_reused and dsi_reused and os.path.isfile(hadd_out):
-                    print(f"  hadd         {hjob}.root already exists -- reusing, not resubmitted")
+            # ---- get_yk_new (resNLO only)
+            yk_job = None
+            if do_resnlo:
+                yk_dir = os.path.join(cfg.dest, "get_yk_new")
+                yk_job = f"{cfg.name}_Yk_{tag}_{cfg.order}"
+                yk_out = os.path.join(yk_dir, yk_job + ".out")
+                yk_upstream = [s for s in ("w_pert", "w_asym", "legacy_Y") if s in submitted]
+                if not yk_upstream and valid_output(yk_out, 3, npts):
+                    print(f"  get_yk_new   {yk_job}.out already exists -- reusing, not resubmitted")
                 else:
-                    write(os.path.join(rdir, f"run_{hjob}.sb"),
-                          hadd_script(cfg, hjob, f"{asy_job}.root", f"{dsi_job}.root", f"{hjob}.root"), exe=True)
-                    hdeps = ([] if asy_reused else [f"${{ASY_{tag}_{run}}}"]) + \
-                            ([] if dsi_reused else [f"${{DSI_{tag}_{run}}}"])
-                    dc = f'--dependency=afterok:{":".join(hdeps)} --kill-on-invalid-dep=yes ' if hdeps else ""
-                    sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{hjob}.sb)')
-                    print(f"  hadd         {hjob}.root  ({asy_job}.root + {dsi_job}.root)")
-            sub.append("")
+                    rai = cfg.get("get_yk_new", f"r_ai_{tag}")
+                    if rai:
+                        rai_file = os.path.basename(rai)
+                        copy(cfg.rel(rai), os.path.join(yk_dir, rai_file))
+                        make_rai = ""
+                    else:
+                        if cfg.order == "NNLO":
+                            die(f"NNLO needs a real R_Ai table: set [get_yk_new] r_ai_{tag}")
+                        rai_file = f"{cfg.name}_dummy_R_Ai_{tag}.txt"           # all ones; exact for NLO
+                        make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py ../w_pert/{jobs["w_pert"]}.out '
+                                    f'{rai_file} {int(float(ecm))} {vtype} {cfg.pdf} || exit 1\n')
+                    _, body = yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai)
+                    write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+                    sub.append(f'YK_{etok}{tag}=$(cd "{yk_dir}" && sbatch --parsable {dep_clause(yk_upstream)}'
+                               f'run_get_yk_new_{tag}.sb)')
+                    print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
+                    submitted.add("get_yk_new")
+
+            # ---- resbos (resNLO): one job per run, never sharded; its grids are staged by the job itself
+            if do_resnlo:
+                rdir = os.path.join(cfg.dest, "resbos")
+                os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+                runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+                for run in runs:
+                    rjob = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_main"]),
+                                             ("get_yk_new", yk_job), tlines["resbos"], suffix="resNLO")
+                    root_out = os.path.join(cfg.dest, rjob + ".root")
+                    rdeps = [s for s in ("get_yk_new", "legacy_main") if s in submitted]
+                    if not rdeps and os.path.isfile(root_out):
+                        print(f"  resbos       {rjob}.root already exists -- reusing, not resubmitted")
+                        continue
+                    dc = dep_clause(["YK_" + etok + tag if s == "get_yk_new" else s for s in rdeps])
+                    sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{rjob}.sb)')
+                    print(f"  resbos       {rjob}.in")
+                sub.append("")
+
+            # ---- NLO fixed order: Legacy LTO=2 (asy) + LTO=3 (Y, shared with resNLO) -> resbos,
+            # and Legacy LTO=1 (dsi) alone -> resbos (Y piece = "-"), then hadd the two .root
+            # files -- see README.md "NLO (fixed order)" for why this equals the real-emission
+            # fixed-order cross section.
+            if do_nlo:
+                rdir = os.path.join(cfg.dest, "resbos")
+                os.makedirs(os.path.join(rdir, "Resbos_grids"), exist_ok=True)
+                runs = [r.strip() for r in cfg.get("resbos", "runs", "default").split(",") if r.strip()]
+                for run in runs:
+                    asy_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_asy"]),
+                                                ("legacy", jobs["legacy_Y"]), tlines["resbos"], suffix="nloasy")
+                    dsi_job = write_resbos_run(cfg, rdir, tag, run, ("legacy", jobs["legacy_dsi"]),
+                                                None, tlines["resbos"], suffix="nlodsi")
+                    asy_root = os.path.join(cfg.dest, asy_job + ".root")
+                    dsi_root = os.path.join(cfg.dest, dsi_job + ".root")
+                    asy_deps = [s for s in ("legacy_asy", "legacy_Y") if s in submitted]
+                    dsi_deps = [s for s in ("legacy_dsi",) if s in submitted]
+                    asy_reused = not asy_deps and os.path.isfile(asy_root)
+                    dsi_reused = not dsi_deps and os.path.isfile(dsi_root)
+                    if asy_reused:
+                        print(f"  resbos       {asy_job}.root already exists -- reusing, not resubmitted")
+                    else:
+                        sub.append(f'ASY_{etok}{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(asy_deps)}'
+                                   f'run_{asy_job}.sb)')
+                        print(f"  resbos       {asy_job}.in")
+                    if dsi_reused:
+                        print(f"  resbos       {dsi_job}.root already exists -- reusing, not resubmitted")
+                    else:
+                        sub.append(f'DSI_{etok}{tag}_{run}=$(cd "{rdir}" && sbatch --parsable {dep_clause(dsi_deps)}'
+                                   f'run_{dsi_job}.sb)')
+                        print(f"  resbos       {dsi_job}.in")
+
+                    hjob = f"{cfg.name}_{tag}_{run}_NLO"
+                    hadd_out = os.path.join(cfg.dest, hjob + ".root")
+                    if asy_reused and dsi_reused and os.path.isfile(hadd_out):
+                        print(f"  hadd         {hjob}.root already exists -- reusing, not resubmitted")
+                    else:
+                        write(os.path.join(rdir, f"run_{hjob}.sb"),
+                              hadd_script(cfg, hjob, f"{asy_job}.root", f"{dsi_job}.root", f"{hjob}.root"), exe=True)
+                        hdeps = ([] if asy_reused else [f"${{ASY_{etok}{tag}_{run}}}"]) + \
+                                ([] if dsi_reused else [f"${{DSI_{etok}{tag}_{run}}}"])
+                        dc = f'--dependency=afterok:{":".join(hdeps)} --kill-on-invalid-dep=yes ' if hdeps else ""
+                        sub.append(f'(cd "{rdir}" && sbatch --parsable {dc}run_{hjob}.sb)')
+                        print(f"  hadd         {hjob}.root  ({asy_job}.root + {dsi_job}.root)")
+                sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
     write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)

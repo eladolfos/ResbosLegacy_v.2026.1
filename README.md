@@ -126,18 +126,18 @@ Files involved:
 
 | File | Purpose |
 |---|---|
-| `7TeV_WpWm_example.ini` | The whole run in one file: energy, PDF, bosons, order, shards, optional resbos cuts |
-| `run_process.py` | The driver: prepares a run folder and writes the job chain |
+| `Examples/7TeV_WpWm_example.ini` | The whole run in one file: energy, PDF, bosons, order, shards, optional resbos cuts |
+| `run_process.py` | The driver: prepares a run folder and writes the job chain -- the only file you need to copy elsewhere; every other path (`source`, `scripts`, ...) is named in the `.ini` |
 | `templates/7TeV_WpWm/` | The *source*: `get_yk_new/ legacy/ resbos/ w_asym/ w_pert/` with the W+ `.in` files and the `inp/` grids (its old executables are not used) |
-| `shrds_scripts/` | Scripts that split the long runs along Q into SLURM job arrays and merge them back |
+| `scripts/` | Scripts that split the long runs along Q into SLURM job arrays and merge them back, plus `make_grid_from_data.py` (`[grids] generate`) |
 
 ### 3.1 Edit the `.ini`
 
-Open `7TeV_WpWm_example.ini`. The main settings (relative paths are relative to the `.ini`):
+Open `Examples/7TeV_WpWm_example.ini`. The main settings (relative paths are relative to the `.ini`, i.e. to `Examples/`):
 
 ```ini
 [paths]
-source = templates/7TeV_WpWm    # template folder
+source = ../templates/7TeV_WpWm # template folder (one level up: the .ini lives in Examples/)
 dest   = run_7TeV_WpWm          # NEW folder, created by the driver; the jobs run here
 
 [campaign]
@@ -162,6 +162,45 @@ p+Cu target; applied to both the `legacy_Y` and `legacy_main` `.in` files), `[re
 luminosity, output format and named cut sets `runs = atlas, nocuts` with `[cuts.<name>]`) and `[environment]`
 (modules, LHAPDF, HOPPET, ROOT paths used inside the generated job scripts — set these if your installs
 differ from the defaults).
+
+### `[energies]`: several collider energies in one campaign
+
+`[campaign] name`/`ecm` are a single prefix/energy by default. When the same process needs to
+run at several energies (e.g. W+/W- at 5/7/8/13 TeV, otherwise identical: same PDF/order/grid/
+shards/`[legacy]`/`[resbos]`), replace them with an `[energies]` section instead, one line per
+energy as `<label> = <ecm_GeV>, <file_prefix>`:
+
+```ini
+[campaign]
+# name / ecm: omitted -- each energy below supplies its own
+processes = W+, W-
+pdf       = CT25NLO
+order     = NLO
+
+[energies]
+5TeV  = 5000,  pp5TeVCT25NLO
+7TeV  = 7000,  pp7TeVCT25NLO
+8TeV  = 8000,  pp8TeVCT25NLO
+13TeV = 13000, pp13TeVCT25NLO
+```
+
+The label (left of `=`) is only used in log/echo messages; the second value is the file prefix
+for that energy's jobs/outputs, so pick a **unique one per energy** — the driver refuses two
+energies sharing a prefix, and refuses `[energies]` together with `[campaign] name`/`ecm` set
+(remove those when using `[energies]`). Every other section (`[paths] source`/`[templates]`/
+`[grids]`/`[shards]`/`[legacy]`/`[resbos]`/`[executables]`) is shared across all the energies —
+they all write into the same `dest`, chained into one `submit_all.sh`, disambiguated purely by
+each energy's prefix. See `pp_multiTeV_WpWmCT25_resNLO_NLO.ini` for a worked example.
+
+Since every energy in the list shares one `[paths] source` grid, point it at the template built
+for the **highest** energy: a wider grid safely covers a narrower one (points beyond the
+kinematic boundary at lower ECM just come back zero — `w_pert.f`/`w_asym.f`'s `YMAXIMUM` check,
+Legacy's `pert.for`/`res.for` `YMAX`+`x_a`/`x_b>=1` check — never a crash), but the reverse isn't
+true (a grid built for a lower energy can clip the true kinematic edge at a higher one — see
+`pp_multiTeV_WpWmCT25_resNLO_NLO.ini`'s header comment for the exact margin numbers).
+
+`--resbos-only`, `[grids] experimental` (ExpCustomGrid) and `--reuse` all support `[energies]`
+too, applying the same per-energy loop.
 
 ### `[campaign] compute`: resNLO, NLO, or both
 
@@ -349,7 +388,7 @@ folder — easy to find and `scp`/copy out without digging into `resbos/`.
 ### 3.2 Prepare the run folder
 
 ```bash
-python3 run_process.py 7TeV_WpWm_example.ini
+python3 run_process.py Examples/7TeV_WpWm_example.ini
 ```
 
 This creates `run_7TeV_WpWm/` with everything a run needs (the executables from `bin/`, grids, `.in` files rewritten for the
@@ -364,13 +403,13 @@ the space as soon as the merged `.out` is verified good. If the check fails the 
 the bad shard. Without the flag the shards are kept in every case.
 
 ```bash
-python3 run_process.py 7TeV_WpWm_example.ini --clean-shards
+python3 run_process.py Examples/7TeV_WpWm_example.ini --clean-shards
 ```
 
 ### 3.3 Submit
 
 ```bash
-python3 run_process.py 7TeV_WpWm_example.ini --reuse --submit     # on the HPCC login node
+python3 run_process.py Examples/7TeV_WpWm_example.ini --reuse --submit     # on the HPCC login node
 # or, if the folder is already prepared:
 bash run_7TeV_WpWm/submit_all.sh
 ```
@@ -440,7 +479,7 @@ mt_met = 0.0, 10000., 0.0
 ```
 
 ```bash
-python3 run_process.py 7TeV_WpWm_example.ini --resbos-only --submit
+python3 run_process.py Examples/7TeV_WpWm_example.ini --resbos-only --submit
 ```
 
 It re-copies the current `resbos_root` from `bin/` (so a rebuilt `resbos` is picked up too), checks that
@@ -455,8 +494,8 @@ resbos cuts edit `ecm`, `pdf`, `order` or the `[resbos]` / `[cuts.<name>]` secti
 (or `name`) so that you do not overwrite a previous run.
 
 ```bash
-cp 7TeV_WpWm_example.ini 8TeV_WpWm.ini      # edit name, ecm, dest, ...
-python3 run_process.py 8TeV_WpWm.ini --submit
+cp Examples/7TeV_WpWm_example.ini Examples/8TeV_WpWm.ini      # edit name, ecm, dest, ...
+python3 run_process.py Examples/8TeV_WpWm.ini --submit
 ```
 
 `--reuse` refreshes an existing `dest`, but it refuses to reuse a `<job>_shards/` folder whose `.in` changed
@@ -464,24 +503,37 @@ python3 run_process.py 8TeV_WpWm.ini --submit
 job names that would be longer than 95 characters and grid sets that are not identical in `w_pert`, `w_asym`
 and `legacy`.
 
-`W+`, `W-` and `A0` (fixed-target photon Drell-Yan, e.g. E605) are wired up end to end in the driver;
-`Z0` is defined in `PROCS` but `get_yk_new.f` still `STOP`s for it (no `convert` factor implemented
-there yet).
+`W+`, `W-` and `A0` (fixed-target photon Drell-Yan, e.g. E605) are wired up end to end in the driver.
+`Z0` (`JZ_TYPE=0`, the combined up+down-type grid `run_process.py` already builds via `[campaign]
+processes = Z0`) works at `order = NLO`: `get_yk_new.f`'s `convert` factor (only read by its NNLO
+branch) is a harmless placeholder for `Z0`, mirroring `A0`'s own NLO-only gap. `order = NNLO` still
+explicitly `STOP`s for `Z0` (unlike `A0`'s "not implemented yet", this is a real physics gap: a
+combined `Z0` sample mixes ZU/ZD contributions with different EW couplings, so there is no single
+correct conversion factor for it without a genuine separate ZU/ZD run + combination step, which
+the driver does not automate). Not yet run for real end to end (no `gfortran`/HPCC access here).
 
 ## 4. Repository layout
 
 ```
-run_process.py            driver (prepares a run and writes submit_all.sh)
-7TeV_WpWm_example.ini     example configuration (compute = resNLO, the default)
-7TeV_WpWm_NLO_resNLO.ini  same campaign, compute = NLO, resNLO (fixed order + resummed, see section 3.1)
-E201_e605_fine.ini        E605 fixed-target example (compute = resNLO)
-E201_e605_NLO_resNLO.ini  same campaign, compute = NLO, resNLO
+run_process.py                       driver (prepares a run and writes submit_all.sh) -- the only file
+                                      you need to copy elsewhere; [paths] source/scripts in the .ini say
+                                      where everything else it needs lives
+Examples/                            every campaign .ini lives here
+  7TeV_WpWm_example.ini                example configuration (compute = resNLO, the default)
+  7TeV_WpWm_NLO_resNLO.ini             same campaign, compute = NLO, resNLO (fixed order + resummed, section 3.1)
+  E201_e605_fine.ini                   E605 fixed-target example (compute = resNLO)
+  E201_e605_NLO_resNLO.ini             same campaign, compute = NLO, resNLO
+  pp_multiTeV_WpWmCT25_resNLO_NLO.ini  same W+/W- campaign at 5/7/8/13 TeV in one .ini ([energies], section 3)
+  run_*/                                generated (git-ignored) prepared runs, one per .ini's own [paths] dest
+scripts/                              Q-sharding scripts (make_shards / merge_shards / run_*_array /
+                                      submit_*_array) + make_grid_from_data.py ([grids] generate) --
+                                      [paths] scripts in the .ini says where this folder is
 setup_resbos_legacy.sb    builds the five executables into bin/
-shrds_scripts/            Q-sharding scripts (make_shards / merge_shards / run_*_array / submit_*_array)
 templates/7TeV_WpWm/      source template for the example (.in files, grids; its old executables are not used)
+templates/13TeV_WpWm/     same, with y_grid.inp extended to +-5.60 so it also covers 13 TeV (see [energies] above)
 w_pert_08112022/  w_asym_08112022/  legacy_final_vesion/  get_yk_new/  resbos/
                           source code of the five programs (Fortran 77 fixed format + C/C++ bridges)
-bin/  build/  run_*/      generated (git-ignored): bin/ = fresh executables, run_*/ = prepared runs
+bin/  build/               generated (git-ignored): bin/ = fresh executables
 ```
 
 Notes on the source: the Fortran needs `-fno-automatic` (already in every Makefile; never drop it), and
