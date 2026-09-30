@@ -157,11 +157,33 @@ w_asym = 4
 
 Optional sections (all documented in the example file): `[grids] active` to run a sub-range of the grid,
 `[grids] experimental` for "ExpCustomGrid" mode (below), `[legacy]` overrides (`bmax`, `nonpert`, `ibeam`,
-`fract_n` — the latter two for fixed-target/nuclear-target runs, e.g. `ibeam = 0` + `fract_n = 0.54d0` for a
-p+Cu target; applied to both the `legacy_Y` and `legacy_main` `.in` files), `[resbos]` (VEGAS settings, seed,
+`fract_n`; applied to `legacy_Y`/`legacy_main`/`legacy_dsi`/`legacy_asy`), `[resbos]` (VEGAS settings, seed,
 luminosity, output format and named cut sets `runs = atlas, nocuts` with `[cuts.<name>]`) and `[environment]`
 (modules, LHAPDF, HOPPET, ROOT paths used inside the generated job scripts — set these if your installs
 differ from the defaults).
+
+#### `[legacy] ibeam`: beam species, applied everywhere it matters
+
+`ibeam` is `-2`/`-1`/`0`/`1` for PiN/ppbar/pN/pp (`w_pert.f`/`w_asym.f`/Legacy's own `.in` comments).
+Setting it patches **every** code that needs to know: Legacy's four `.in` files always, and
+`w_pert`/`w_asym`'s own `"ECM,iBeam"` line whenever the value is one they actually support (`1`
+or `-1` — `w_pert.f`/`w_asym.f` have no genuine nuclear/pion-target mode of their own). `resbos`
+needs no separate setting: `resbos_root.f` reads `IBEAM` from the "Main data grid" header that
+Legacy itself writes, so it inherits the correct value automatically once Legacy's is correct.
+
+- `ibeam = -1` (ppbar, e.g. Tevatron): propagates to Legacy **and** `w_pert`/`w_asym` — see
+  `Examples/ppbar_WpWm_CT25_Tevatron_1800_1960_resNLO_NLO.ini` and `templates/Tevatron_WpWm/`.
+- `ibeam = 0` + `fract_n = 0.54d0` (a p+Cu fixed target, e.g. E605): only patches Legacy.
+  `w_pert`/`w_asym` stay at whatever `[templates]` w_pert/w_asym already have (normally `1`/pp)
+  — the nuclear-target physics lives entirely in Legacy's `iBeam`+`FRACT_N`, and `w_pert`/`w_asym`
+  always compute the plain-pp partonic piece per nucleon. This is unchanged, established behavior
+  (`templates/E605_fine/w_pert/*.in` etc. already ship with `iBeam=1` baked in for exactly this
+  reason) — not something to "fix" by forcing `w_pert`/`w_asym` to `0`, which they don't support.
+- Before this was wired up, `[legacy] ibeam` only ever patched Legacy — building a `ppbar`
+  campaign by just adding `ibeam = -1` to an existing `pp` `.ini` would have left `w_pert`/`w_asym`
+  silently computing `pp` while Legacy computed `ppbar`, corrupting `get_yk_new`'s K-factor with
+  no error at all. `patch_stage()` now closes that gap for every `ibeam` value `w_pert`/`w_asym`
+  can represent.
 
 ### `[energies]`: several collider energies in one campaign
 
@@ -524,6 +546,7 @@ Examples/                            every campaign .ini lives here
   E201_e605_fine.ini                   E605 fixed-target example (compute = resNLO)
   E201_e605_NLO_resNLO.ini             same campaign, compute = NLO, resNLO
   pp_multiTeV_WpWmCT25_resNLO_NLO.ini  same W+/W- campaign at 5/7/8/13 TeV in one .ini ([energies], section 3)
+  ppbar_WpWm_CT25_Tevatron_1800_1960_resNLO_NLO.ini  W+/W- at Tevatron Run I+II (p-pbar, ibeam=-1)
   run_*/                                generated (git-ignored) prepared runs, one per .ini's own [paths] dest
 scripts/                              Q-sharding scripts (make_shards / merge_shards / run_*_array /
                                       submit_*_array) + make_grid_from_data.py ([grids] generate) --
@@ -531,6 +554,8 @@ scripts/                              Q-sharding scripts (make_shards / merge_sh
 setup_resbos_legacy.sb    builds the five executables into bin/
 templates/7TeV_WpWm/      source template for the example (.in files, grids; its old executables are not used)
 templates/13TeV_WpWm/     same, with y_grid.inp extended to +-5.60 so it also covers 13 TeV (see [energies] above)
+templates/Tevatron_WpWm/  same as 7TeV_WpWm, byte-identical grid -- only its 8 .in files' iBeam
+                          tokens (legacy x4, w_pert x2, w_asym x2) are set to -1 (ppbar)
 w_pert_08112022/  w_asym_08112022/  legacy_final_vesion/  get_yk_new/  resbos/
                           source code of the five programs (Fortran 77 fixed format + C/C++ bridges)
 bin/  build/               generated (git-ignored): bin/ = fresh executables

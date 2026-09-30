@@ -132,7 +132,19 @@ def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
     has to set_active() (build()) or write single-point grid files (build_points())."""
     lines = list(tlines[stage])
     if stage in ("w_pert", "w_asym"):
-        set_token(lines, find(lines, "ECM,iBeam", "ECM"), 0, ecm)
+        ecm_line = find(lines, "ECM,iBeam", "ECM")
+        set_token(lines, ecm_line, 0, ecm)
+        ibeam = cfg.get("legacy", "ibeam")
+        if ibeam:
+            ibeam = check_ibeam(ibeam)
+            if ibeam in ("1", "-1"):
+                set_token(lines, ecm_line, 1, ibeam)
+            # else (0=pN, -2=PiN): w_pert.f/w_asym.f's own "ECM,iBeam=-1,1:ppB/pp" only
+            # supports pp/ppbar -- there is no genuine nuclear/pion-target mode there, so for
+            # a fixed-target campaign (the established E605 approach) their iBeam stays at
+            # whatever [templates] w_pert/w_asym already have (normally 1/pp: the nuclear
+            # target's physics lives entirely in Legacy's iBeam+FRACT_N, and w_pert/w_asym
+            # always compute the plain-pp partonic piece per nucleon).
         jwtype_line = find(lines, "JWTYPE", "JWTYPE")
         set_token(lines, jwtype_line, 0, str(jw))
         if jw == 2:
@@ -181,7 +193,8 @@ def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
         if cfg.get("legacy", "nonpert"):
             put(lines, find(lines, "g1, g2, g3, Q0, nG", "nonpert"), cfg.get("legacy", "nonpert"))
         if cfg.get("legacy", "ibeam"):
-            set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 0, cfg.get("legacy", "ibeam"))
+            set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 0,
+                      check_ibeam(cfg.get("legacy", "ibeam")))
         if cfg.get("legacy", "fract_n"):
             set_token(lines, find(lines, "FRACT_N", "ibeam/fract_n"), 1, cfg.get("legacy", "fract_n"))
     return lines
@@ -252,6 +265,17 @@ def bash_token(s):
     """Sanitize an [energies] prefix into a valid bash identifier fragment, for the
     M_*/YK_*/ASY_*/DSI_* dependency-tracking variable names in submit_all.sh (see build())."""
     return re.sub(r"[^A-Za-z0-9]", "_", s.upper())
+
+
+IBEAM_VALUES = {"-2": "PiN", "-1": "ppB (ppbar)", "0": "pN", "1": "pp"}
+
+
+def check_ibeam(ibeam):
+    ibeam = ibeam.strip()
+    if ibeam not in IBEAM_VALUES:
+        die(f"[legacy] ibeam = '{ibeam}' not recognized -- must be one of "
+            f"{', '.join(f'{k} ({v})' for k, v in IBEAM_VALUES.items())}")
+    return ibeam
 
 
 # ------------------------------------------------------------------ config
