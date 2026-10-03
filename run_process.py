@@ -36,6 +36,7 @@ wherever scripts/ (and the source template) actually live.
 import argparse
 import configparser
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -124,6 +125,98 @@ def set_active(lines, act, full):
 def grid_paths(lines):
     return [lines[find(lines, m, m)].split(">", 1)[0].strip()
             for m in ("Q grid file name", "qT grid file name", "y grid file name")]
+
+
+def max_safe_q_index(q_vals, ecm):
+    """Largest 1-based index i with q_vals[i-1] <= ecm (0 if even q_vals[0] is already too
+    high). q_vals must be ascending (true of every q_grid.inp in this repo)."""
+    safe = 0
+    for i, q in enumerate(q_vals, start=1):
+        if q <= ecm:
+            safe = i
+        else:
+            break
+    return safe
+
+
+def check_q_kinematics(cfg, q_vals, act):
+    """Catch a doomed multi-hour run before it starts, for every [energies] entry (active is
+    shared across all of them -- see Cfg._parse_energies()). legacy_final_vesion/pert.for's
+    PERTURB (the real-emission piece behind the Y-grid) computes per point:
+        TM_V = sqrt(QT_V^2+Q_V^2);  RTAUP = (TM_V+QT_V)/ECM
+        X1LOW = RTAUP*exp(Y_V);  X2LOW = RTAUP/exp(Y_V)
+    and does `CALL QUIT` (killing the whole shard) the moment BOTH exceed 1 -- first hit at the
+    smallest active qT and the active y closest to 0, where RTAUP~=Q_V/ECM, i.e. any active Q
+    point above ECM is kinematically impossible (a parton can't carry more momentum than its own
+    hadron), not merely slow. Confirmed empirically on a real ppbar/1800 GeV run: every Q-shard
+    with Q<=ECM finished clean with the expected row count; every shard with Q>ECM died within
+    seconds with legacy's own "ERROR IN PERTURB. x1Low, x2Low = ...", "Stopping in QUIT."."""
+    qmin_idx, qmax_idx, qstep = act[6], act[7], act[8]
+    q_active_max = q_vals[qmax_idx - 1]
+    bad, safe_idxs = [], []
+    for energy in cfg.energies:
+        ecm_f = float(energy.ecm)
+        safe_idx = max_safe_q_index(q_vals, ecm_f)
+        safe_idxs.append(safe_idx)
+        if safe_idx == 0:
+            bad.append(f"  {energy.name} (ecm={energy.ecm}): NO Q grid point is <= this energy -- "
+                       f"the active Q range (up to index {qmax_idx}, Q={q_active_max}) is entirely "
+                       f"out of kinematic reach; check [campaign]/[energies] ecm")
+        elif qmax_idx > safe_idx:
+            bad.append(f"  {energy.name} (ecm={energy.ecm}): active Q goes up to index {qmax_idx} "
+                       f"(Q={q_active_max} GeV) but only Q<=index {safe_idx} (Q={q_vals[safe_idx - 1]} "
+                       f"GeV) is <= this energy's ECM")
+    if not bad:
+        return
+    safe_nonzero = [i for i in safe_idxs if i > 0]
+    if safe_nonzero:
+        shared_cap = min(safe_nonzero)
+        fix = (f"lower [grids] active's Q_max index (last-but-one of the 9 numbers) to "
+               f"{shared_cap} or less -- e.g.:\n"
+               f"       active = {act[0]} {act[1]} {act[2]}  {act[3]} {act[4]} {act[5]}  "
+               f"{qmin_idx} {shared_cap} {qstep}\n"
+               f"       (that's the cap set by the LOWEST energy below; a HIGHER energy could "
+               f"safely use a larger index -- give it its own .ini with its own [grids] active "
+               f"if you don't want to leave that extra Q range on the table, the way "
+               f"Examples/ppbar_WpWm_CT25_Tevatron_1800_resNLO_NLO.ini / "
+               f"..._1960_resNLO_NLO.ini split Run I/Run II instead of sharing one active range)")
+    else:
+        fix = ("no Q index is safe for every energy here -- split [energies] into separate "
+               ".ini files, one per energy, each with its own [grids] active")
+    die("[grids] active includes Q points above (at least) one [energies]/[campaign] ecm -- "
+        "legacy_final_vesion/pert.for's PERTURB will CALL QUIT partway through a shard (parton "
+        "x=Q/ECM>1 is kinematically impossible), after burning hours of w_pert/w_asym/legacy "
+        "compute on the shards before it:\n" + "\n".join(bad) + "\n       fix: " + fix)
+
+
+def check_q_kinematics_points(cfg, points, qt_min):
+    """Same CALL QUIT failure mode as check_q_kinematics(), for [grids] experimental mode's
+    per-point (y, Q) table instead of a shared rectangular grid -- here each point already has
+    its OWN fixed y (no active sub-range), checked at the mode's shared qt_min (every point runs
+    across the same qT grid -- see build_points()). Checked for every [energies] entry."""
+    bad = []
+    for energy in cfg.energies:
+        ecm_f = float(energy.ecm)
+        worst = []
+        for y_s, q_s in points:
+            y, q = float(y_s), float(q_s)
+            tm_v = math.sqrt(qt_min ** 2 + q ** 2)
+            rtaup = (tm_v + qt_min) / ecm_f
+            if rtaup * math.exp(y) > 1.0 and rtaup / math.exp(y) > 1.0:
+                worst.append((q, y))
+        if worst:
+            worst.sort()
+            bad.append(f"  {energy.name} (ecm={energy.ecm}): {len(worst)}/{len(points)} "
+                       f"experimental points are kinematically impossible at this energy, e.g. "
+                       f"Q={worst[-1][0]}, y={worst[-1][1]}")
+    if not bad:
+        return
+    die("[grids] experimental's data table includes (Q,y) points above (at least) one "
+        "[energies]/[campaign] ecm -- legacy_final_vesion/pert.for's PERTURB will CALL QUIT "
+        "partway through that point's job (parton x>1 is kinematically impossible), after "
+        "burning compute on the points before it:\n" + "\n".join(bad) + "\n"
+        "       fix: drop those rows from the experimental data table (or fix [energies]/ecm) -- "
+        "they're outside this energy's kinematic reach")
 
 
 def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
@@ -450,7 +543,7 @@ def instantiate_shard_scripts(cfg, folder, label, exe, header_lines, npts, clean
              f'python3 "{SELF}" _check "${{JOBNAME}}.out" $K {npts}\n'
              f'CHECK_EXIT=$?\n'
              f'{timing_fn(cfg)}'
-             f'log_elapsed "{label} merge ($JOBNAME, exit=$CHECK_EXIT)" "$STAGE_T0"\n'
+             f'log_elapsed "{label} merge ($JOBNAME, exit=$CHECK_EXIT)" "$STAGE_T0" "$CHECK_EXIT"\n'
              f'[ $CHECK_EXIT -eq 0 ] || exit 1\n')
     if clean_shards:
         # only reached if the check above passed (it exits 1 otherwise): the shards are kept for debugging on failure
@@ -506,19 +599,27 @@ def timing_fn(cfg):
       excludes time spent waiting on those dependencies -- no argument-passing needed)."""
     log = os.path.join(cfg.dest, "timing.log")
     return (f'TIMING_LOG="{log}"\n'
-            'log_elapsed() {   # log_elapsed STAGE [STAGE_START_EPOCH]\n'
-            '  local t0 now elapsed stage_t0 dur dur_str\n'
+            'log_elapsed() {   # log_elapsed STAGE [STAGE_START_EPOCH] [EXIT_CODE]\n'
+            '  local t0 now elapsed stage_t0 dur dur_str exit_code error_msg\n'
             '  t0=$(awk \'/^T0 /{print $2; exit}\' "$TIMING_LOG" 2>/dev/null)\n'
             '  now=$(date +%s)\n'
             '  elapsed=$([ -n "$t0" ] && echo $((now - t0)) || echo -1)\n'
             '  stage_t0="$2"\n'
+            '  exit_code="${3:-0}"\n'
             '  dur=$([ -n "$stage_t0" ] && echo $((now - stage_t0)) || echo $SECONDS)\n'
             '  dur_str=$(printf \'%ss (%dh%02dm%02ds)\' "$dur" $((dur/3600)) $(((dur%3600)/60)) $((dur%60)))\n'
             '  { flock -x 201\n'
-            '    printf \'%s  %-40s  duration=%-18s elapsed_since_start=%ss (%dh%02dm%02ds)\\n\' \\\n'
-            '      "$(date \'+%F %T\')" "$1" "$dur_str" "$elapsed" \\\n'
-            '      $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) \\\n'
-            '      >> "$TIMING_LOG"\n'
+            '    if [ "$exit_code" -eq 0 ]; then\n'
+            '      printf \'%s  %-40s  duration=%-18s elapsed_since_start=%ss (%dh%02dm%02ds)\\n\' \\\n'
+            '        "$(date \'+%F %T\')" "$1" "$dur_str" "$elapsed" \\\n'
+            '        $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) \\\n'
+            '        >> "$TIMING_LOG"\n'
+            '    else\n'
+            '      error_msg=$(tail -n5 "$0".err 2>/dev/null | grep -i "error\|failed" | head -n1 | cut -c1-80)\n'
+            '      printf \'%s  %-40s  exit=%d  ERROR: %s\\n\' \\\n'
+            '        "$(date \'+%F %T\')" "$1" "$exit_code" "$error_msg" \\\n'
+            '        >> "$TIMING_LOG"\n'
+            '    fi\n'
             '  } 201>>"$TIMING_LOG.lock"\n'
             '}\n')
 
@@ -530,8 +631,8 @@ def yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai):
     staging = "".join(f"stage {src} {dst}\n" for src, dst in ins)
     body = f"""#!/bin/bash --login
 #SBATCH --job-name={job}
-#SBATCH --output=slurm_yk_{tag}_%j.out
-#SBATCH --error=slurm_yk_{tag}_%j.err
+#SBATCH --output=slurm_yk_{cfg.name}_{tag}_%j.out
+#SBATCH --error=slurm_yk_{cfg.name}_{tag}_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1
 #SBATCH --mem=16G
@@ -546,7 +647,7 @@ EXIT_CODE=$?
 echo "get_yk_new finished with exit code $EXIT_CODE"
 [ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {job}.out 3 {npts} || EXIT_CODE=1
 {timing_fn(cfg)}
-log_elapsed "get_yk_new ({tag}, exit=$EXIT_CODE)"
+log_elapsed "get_yk_new ({tag}, exit=$EXIT_CODE)" "" "$EXIT_CODE"
 exit $EXIT_CODE
 """
     return job, body
@@ -587,7 +688,7 @@ if [ $EXIT_CODE -eq 0 ] && [ -f "{rjob}.root" ]; then
   echo "moved {rjob}.root -> {cfg.dest}/{rjob}.root" | tee -a "$LOG_FILE"
 fi
 {timing_fn(cfg)}
-log_elapsed "resbos ({rjob}, exit=$EXIT_CODE)"
+log_elapsed "resbos ({rjob}, exit=$EXIT_CODE)" "" "$EXIT_CODE"
 exit $EXIT_CODE
 """
 
@@ -612,7 +713,7 @@ hadd -f "{cfg.dest}/{out_root}" "{cfg.dest}/{asy_root}" "{cfg.dest}/{dsi_root}"
 EXIT_CODE=$?
 echo "hadd finished with exit code $EXIT_CODE"
 {timing_fn(cfg)}
-log_elapsed "hadd NLO ({hjob}, exit=$EXIT_CODE)"
+log_elapsed "hadd NLO ({hjob}, exit=$EXIT_CODE)" "" "$EXIT_CODE"
 exit $EXIT_CODE
 """
 
@@ -762,7 +863,7 @@ python3 "{SELF}" _merge_points {prefix} {width} {npts} {header_lines} {prefix}_c
 EXIT_CODE=$?
 [ $EXIT_CODE -eq 0 ] && python3 "{SELF}" _check {prefix}_combined.out {per_point} {npts * nqt} || EXIT_CODE=1
 {timing_fn(cfg)}
-log_elapsed "{prefix} merge (exit=$EXIT_CODE)" "$STAGE_T0"
+log_elapsed "{prefix} merge (exit=$EXIT_CODE)" "$STAGE_T0" "$EXIT_CODE"
 exit $EXIT_CODE
 """
 
@@ -862,6 +963,7 @@ def build_points(cfg, args):
     q_vals = unique_sorted_vals([q for _, q in points])
     y_vals = unique_sorted_vals([y for y, _ in points])
     qt_vals = [l.strip() for l in open(ref_qt[0]) if l.strip()]
+    check_q_kinematics_points(cfg, points, min(float(v) for v in qt_vals))
 
     if npts != len(q_vals) * len(y_vals):
         print(f"WARNING: these {npts} points are not a perfect Q x y rectangle "
@@ -938,10 +1040,11 @@ def build_points(cfg, args):
                                 int(float(ecm)), vtype, cfg.pdf)
                 make_rai = ""
             yk_job, body = yk_script(cfg, tag, vtype, combined, total_pts, rai_file, make_rai)
-            write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+            yk_script_name = f"run_get_yk_new_{etok}{tag}.sb"
+            write(os.path.join(yk_dir, yk_script_name), body, exe=True)
             sub.append(f'YK_{etok}{tag}=$(cd "{yk_dir}" && sbatch --parsable --dependency=afterok:'
                        f'${merge_ids["w_pert"]}:${merge_ids["w_asym"]}:${merge_ids["legacy_Y"]} '
-                       f'--kill-on-invalid-dep=yes run_get_yk_new_{tag}.sb)')
+                       f'--kill-on-invalid-dep=yes {yk_script_name})')
             print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
 
             # ---- resbos: one job per [resbos] run, fed the merged legacy_main + the Yk grid above
@@ -957,8 +1060,41 @@ def build_points(cfg, args):
             sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
+    sub.append(f'( cd "{cfg.dest}" && bash finalize_campaign.sh > /dev/null 2>&1 ) &')
     write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)
     shutil.copyfile(cfg.path, os.path.join(cfg.dest, "campaign.ini"))
+
+    # Generate finalize_campaign.sh - monitors completion and writes summary to timing.log
+    finalize_body = f"""#!/bin/bash
+# Automatically generated by run_process.py - monitors campaign completion and writes summary
+
+TIMING_LOG="{os.path.join(cfg.dest, 'timing.log')}"
+
+# Wait for all SLURM jobs to complete
+while squeue -u $USER 2>/dev/null | grep -q .; do
+    sleep 60
+done
+
+# Calculate and log summary
+{{
+    flock -x 201 2>/dev/null || true
+    t0=$(awk '/^T0 /{{print $2; exit}}' "$TIMING_LOG" 2>/dev/null)
+    if [ -n "$t0" ]; then
+        now=$(date +%s)
+        total_seconds=$((now - t0))
+        hours=$((total_seconds / 3600))
+        minutes=$(((total_seconds % 3600) / 60))
+        seconds=$((total_seconds % 60))
+
+        printf '\\n%s\\n' "================================================" >> "$TIMING_LOG"
+        printf '%s  %-40s  TOTAL TIME: %dh%02dm%02ds\\n' \
+            "$(date '+%F %T')" "CAMPAIGN COMPLETE" "$hours" "$minutes" "$seconds" >> "$TIMING_LOG"
+        printf '%s\\n' "================================================" >> "$TIMING_LOG"
+    fi
+}} 201>>"$TIMING_LOG.lock" 2>/dev/null || true
+"""
+    write(os.path.join(cfg.dest, "finalize_campaign.sh"), finalize_body, exe=True)
+
     print(f"\nprepared {cfg.dest}\nnext: bash {os.path.join(cfg.dest, 'submit_all.sh')}")
     if args.submit:
         if not shutil.which("sbatch"):
@@ -1076,6 +1212,7 @@ def build(cfg, args):
     npts = nqt * ny * n_of(*act[6:9])
     print(f"compute: {', '.join(sorted(cfg.compute))}; grid: {counts['Q']} Q x {counts['qT']} qT x "
           f"{counts['y']} y; active {npts} points")
+    check_q_kinematics(cfg, [float(l) for l in open(ref["Q"][0]) if l.strip()], act)
 
     # ---- copy only what a run needs
     exes = [("legacy", "main"), ("resbos", "resbos_root")]
@@ -1193,9 +1330,10 @@ def build(cfg, args):
                         make_rai = (f'[ -f {rai_file} ] || python3 make_dummy_rai.py ../w_pert/{jobs["w_pert"]}.out '
                                     f'{rai_file} {int(float(ecm))} {vtype} {cfg.pdf} || exit 1\n')
                     _, body = yk_script(cfg, tag, vtype, jobs, npts, rai_file, make_rai)
-                    write(os.path.join(yk_dir, f"run_get_yk_new_{tag}.sb"), body, exe=True)
+                    yk_script_name = f"run_get_yk_new_{etok}{tag}.sb"
+                    write(os.path.join(yk_dir, yk_script_name), body, exe=True)
                     sub.append(f'YK_{etok}{tag}=$(cd "{yk_dir}" && sbatch --parsable {dep_clause(yk_upstream)}'
-                               f'run_get_yk_new_{tag}.sb)')
+                               f'{yk_script_name})')
                     print(f"  get_yk_new   {yk_job}.out  ({cfg.order})")
                     submitted.add("get_yk_new")
 
@@ -1264,8 +1402,41 @@ def build(cfg, args):
                 sub.append("")
 
     sub.append('echo "all jobs submitted; watch with: squeue -u $USER"')
+    sub.append(f'( cd "{cfg.dest}" && bash finalize_campaign.sh > /dev/null 2>&1 ) &')
     write(os.path.join(cfg.dest, "submit_all.sh"), "\n".join(sub) + "\n", exe=True)
     shutil.copyfile(cfg.path, os.path.join(cfg.dest, "campaign.ini"))
+
+    # Generate finalize_campaign.sh - monitors completion and writes summary to timing.log
+    finalize_body = f"""#!/bin/bash
+# Automatically generated by run_process.py - monitors campaign completion and writes summary
+
+TIMING_LOG="{os.path.join(cfg.dest, 'timing.log')}"
+
+# Wait for all SLURM jobs to complete
+while squeue -u $USER 2>/dev/null | grep -q .; do
+    sleep 60
+done
+
+# Calculate and log summary
+{{
+    flock -x 201 2>/dev/null || true
+    t0=$(awk '/^T0 /{{print $2; exit}}' "$TIMING_LOG" 2>/dev/null)
+    if [ -n "$t0" ]; then
+        now=$(date +%s)
+        total_seconds=$((now - t0))
+        hours=$((total_seconds / 3600))
+        minutes=$(((total_seconds % 3600) / 60))
+        seconds=$((total_seconds % 60))
+
+        printf '\\n%s\\n' "================================================" >> "$TIMING_LOG"
+        printf '%s  %-40s  TOTAL TIME: %dh%02dm%02ds\\n' \
+            "$(date '+%F %T')" "CAMPAIGN COMPLETE" "$hours" "$minutes" "$seconds" >> "$TIMING_LOG"
+        printf '%s\\n' "================================================" >> "$TIMING_LOG"
+    fi
+}} 201>>"$TIMING_LOG.lock" 2>/dev/null || true
+"""
+    write(os.path.join(cfg.dest, "finalize_campaign.sh"), finalize_body, exe=True)
+
     print(f"\nprepared {cfg.dest}\nnext: bash {os.path.join(cfg.dest, 'submit_all.sh')}")
     if args.submit:
         if not shutil.which("sbatch"):
