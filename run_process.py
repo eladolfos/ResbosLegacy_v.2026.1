@@ -719,32 +719,44 @@ exit $EXIT_CODE
 
 
 def infer_vegas_events(cfg, rdir, tag, suffix):
-    """Infer correct event count for NLO/resNLO from existing .root file.
-    If NLO/resNLO .root exists, scale VEGAS params to match event count."""
+    """Infer correct event count for NLO/resNLO from existing .root or .in file.
+    Strategy: 1) count events in NLO.root, 2) extract VEGAS from NLO.in, 3) use production default"""
     if not suffix or suffix not in ("resNLO", "NLO"):
         return None
-    # Look for corresponding .root file (nloasy or nlodsi merged into NLO.root)
+
+    # Strategy 1: Look for generated NLO.root file and count events
     nlo_file = os.path.join(cfg.dest, f"{cfg.name}_nocuts_NLO.root")
-    if not os.path.isfile(nlo_file):
-        return None
-    try:
-        import uproot
-        with uproot.open(nlo_file) as f:
-            if "h10;1" in f:
-                n_events = f["h10;1"].num_entries
-                # Scale VEGAS params: maintain ratio itmx2:ncall2 (~300:100000), adjust itmx1/ncall1
-                # Template default: 1,30,30000,50,500000 = 30*30k + 50*500k = 900k + 25M = 25.9M
-                # But active line is: 1,30,30000,50,500000 = 30*30k + 50*500k ≠ 500k!
-                # Correct formula: ITMX1*NCALL1 + ITMX2*NCALL2
-                # For ~n_events: use 1, 30, 30000, ceil(n_events/(30*30000+100000)), 100000
-                if n_events > 0:
-                    # Scale to match n_events: 30*30k + ITMX2*100k ≈ n_events
-                    # => ITMX2 ≈ (n_events - 900k) / 100k
-                    itmx2 = max(1, (n_events - 30*30000 + 50000) // 100000)
-                    return f"1,30,30000,{itmx2},100000"
-    except Exception:
-        pass
-    return None
+    if os.path.isfile(nlo_file):
+        try:
+            import uproot
+            with uproot.open(nlo_file) as f:
+                if "h10;1" in f:
+                    n_events = f["h10;1"].num_entries
+                    if n_events > 0:
+                        itmx2 = max(1, (n_events - 30*30000 + 50000) // 100000)
+                        return f"1,30,30000,{itmx2},100000"
+        except Exception:
+            pass
+
+    # Strategy 2: Extract VEGAS from existing NLO.in files (nloasy or nlodsi)
+    for nlo_run in ("nloasy", "nlodsi"):
+        nlo_in = os.path.join(rdir, f"{cfg.name}_{tag}_nocuts_{nlo_run}.in")
+        if os.path.isfile(nlo_in):
+            try:
+                with open(nlo_in, 'r') as f:
+                    for line in f:
+                        if "seed for random" in line or "# runs" in line:
+                            # Parse VEGAS line: iGen,ITMX1,NCALL1,ITMX2,NCALL2,seed
+                            parts = line.split(">", 1)[0].split(",")
+                            if len(parts) >= 5:
+                                # Use the VEGAS params from NLO run (adjust for resNLO's different grid)
+                                return ",".join(p.strip() for p in parts[:5])
+            except Exception:
+                pass
+
+    # Strategy 3: Use production default (1,30,30000,300,100000 ≈ 31.5M events)
+    # This is more realistic than the template's 500K testing default
+    return "1,30,30000,300,100000"
 
 
 def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=None):
