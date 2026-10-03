@@ -10,3 +10,8 @@ __pycache__/
 # ROOT ntuples copied back from the HPCC into hpcc_result/ for local inspection --
 # these are large generated MC outputs (E201_e605n_A0_nocuts.root is ~1.1GB), not source
 hpcc_result/*.root
+
+# Campaign output directories in Examples/ (large simulation results, GB-scale)
+# .ini files are tracked, but subdirectories with results are ignored
+Examples/pp*/
+Examples/ppbar*/
