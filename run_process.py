@@ -718,6 +718,35 @@ exit $EXIT_CODE
 """
 
 
+def infer_vegas_events(cfg, rdir, tag, suffix):
+    """Infer correct event count for NLO/resNLO from existing .root file.
+    If NLO/resNLO .root exists, scale VEGAS params to match event count."""
+    if not suffix or suffix not in ("resNLO", "NLO"):
+        return None
+    # Look for corresponding .root file (nloasy or nlodsi merged into NLO.root)
+    nlo_file = os.path.join(cfg.dest, f"{cfg.name}_nocuts_NLO.root")
+    if not os.path.isfile(nlo_file):
+        return None
+    try:
+        import uproot
+        with uproot.open(nlo_file) as f:
+            if "h10;1" in f:
+                n_events = f["h10;1"].num_entries
+                # Scale VEGAS params: maintain ratio itmx2:ncall2 (~300:100000), adjust itmx1/ncall1
+                # Template default: 1,30,30000,50,500000 = 30*30k + 50*500k = 900k + 25M = 25.9M
+                # But active line is: 1,30,30000,50,500000 = 30*30k + 50*500k ≠ 500k!
+                # Correct formula: ITMX1*NCALL1 + ITMX2*NCALL2
+                # For ~n_events: use 1, 30, 30000, ceil(n_events/(30*30000+100000)), 100000
+                if n_events > 0:
+                    # Scale to match n_events: 30*30k + ITMX2*100k ≈ n_events
+                    # => ITMX2 ≈ (n_events - 900k) / 100k
+                    itmx2 = max(1, (n_events - 30*30000 + 50000) // 100000)
+                    return f"1,30,30000,{itmx2},100000"
+    except Exception:
+        pass
+    return None
+
+
 def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=None):
     """Write resbos/<name>_<tag>_<run>[_<suffix>].in + its .sb from the resbos template +
     [cuts.<run>]; return the job name. main_src/y_src: see resbos_script(); y_src=None
@@ -731,6 +760,11 @@ def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=
     toks = [t.strip() for t in lines[i].split(">", 1)[0].split(",")]
     if cfg.get("resbos", "vegas"):
         toks[:5] = [t.strip() for t in cfg.req("resbos", "vegas").split(",")]
+    elif suffix in ("NLO", "resNLO"):
+        # Auto-scale VEGAS params if not explicitly configured
+        inferred = infer_vegas_events(cfg, rdir, tag, suffix)
+        if inferred:
+            toks[:5] = inferred.split(",")
     if cfg.get("resbos", "seed"):
         toks[5] = cfg.req("resbos", "seed")
     put(lines, i, ",".join(toks))
