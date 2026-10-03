@@ -12,6 +12,7 @@ __pycache__/
 hpcc_result/*.root
 
 # Campaign output directories in Examples/ (large simulation results, GB-scale)
-# .ini files are tracked, but subdirectories with results are ignored
+# Ignores: Examples/pp*/, Examples/ppbar*/ (including ppbar_1p8TeV_WpWmCT25_resNLO_NLO_new/, etc)
+# .ini files are still tracked, but output subdirectories are ignored
 Examples/pp*/
 Examples/ppbar*/
