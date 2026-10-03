@@ -457,6 +457,24 @@ class Cfg:
             self.gen_y_col = int(self.get("grids", "y_col", "1"))
             self.gen_y_spacing = self.get("grids", "y_spacing", "linear")
 
+        # Validate and set defaults for [resbos] section if it exists
+        self._ensure_resbos_defaults()
+
+    def _ensure_resbos_defaults(self):
+        """Ensure [resbos] vegas parameter has sensible default to avoid ambiguity."""
+        if not self.cp.has_section("resbos"):
+            return  # No resbos section, nothing to validate
+
+        if not self.cp.has_option("resbos", "vegas"):
+            # Vegas not specified: set production default (31.5M events)
+            # iGen=1, ITMX1=30, NCALL1=30000, ITMX2=300, NCALL2=100000
+            # Total = 30*30000 + 300*100000 = 900K + 30M = 30.9M events
+            default_vegas = "1,30,30000,300,100000"
+            print(f"INFO: [resbos] vegas not specified in {os.path.basename(self.path)}")
+            print(f"      Using production default: {default_vegas} (~31.5M events)")
+            print(f"      To override, add to [resbos]: vegas = <iGen>,<ITMX1>,<NCALL1>,<ITMX2>,<NCALL2>")
+            self.cp.set("resbos", "vegas", default_vegas)
+
     def _parse_energies(self):
         """[energies]: '<label> = <ecm_GeV>, <file_prefix>' per line, one per energy to run
         this campaign at (same [paths]/[templates]/[grids]/[shards]/[legacy]/[resbos] for all of
@@ -719,44 +737,11 @@ exit $EXIT_CODE
 
 
 def infer_vegas_events(cfg, rdir, tag, suffix):
-    """Infer correct event count for NLO/resNLO from existing .root or .in file.
-    Strategy: 1) count events in NLO.root, 2) extract VEGAS from NLO.in, 3) use production default"""
-    if not suffix or suffix not in ("resNLO", "NLO"):
-        return None
-
-    # Strategy 1: Look for generated NLO.root file and count events
-    nlo_file = os.path.join(cfg.dest, f"{cfg.name}_nocuts_NLO.root")
-    if os.path.isfile(nlo_file):
-        try:
-            import uproot
-            with uproot.open(nlo_file) as f:
-                if "h10;1" in f:
-                    n_events = f["h10;1"].num_entries
-                    if n_events > 0:
-                        itmx2 = max(1, (n_events - 30*30000 + 50000) // 100000)
-                        return f"1,30,30000,{itmx2},100000"
-        except Exception:
-            pass
-
-    # Strategy 2: Extract VEGAS from existing NLO.in files (nloasy or nlodsi)
-    for nlo_run in ("nloasy", "nlodsi"):
-        nlo_in = os.path.join(rdir, f"{cfg.name}_{tag}_nocuts_{nlo_run}.in")
-        if os.path.isfile(nlo_in):
-            try:
-                with open(nlo_in, 'r') as f:
-                    for line in f:
-                        if "seed for random" in line or "# runs" in line:
-                            # Parse VEGAS line: iGen,ITMX1,NCALL1,ITMX2,NCALL2,seed
-                            parts = line.split(">", 1)[0].split(",")
-                            if len(parts) >= 5:
-                                # Use the VEGAS params from NLO run (adjust for resNLO's different grid)
-                                return ",".join(p.strip() for p in parts[:5])
-            except Exception:
-                pass
-
-    # Strategy 3: Use production default (1,30,30000,300,100000 ≈ 31.5M events)
-    # This is more realistic than the template's 500K testing default
-    return "1,30,30000,300,100000"
+    """[DEPRECATED] Vegas parameters are now set via _ensure_resbos_defaults() in Cfg.
+    This function is kept for backward compatibility but returns None (uses config directly)."""
+    # After _ensure_resbos_defaults() runs, [resbos] vegas is always defined
+    # write_resbos_run() will use cfg.get("resbos", "vegas") which won't be None
+    return None
 
 
 def write_resbos_run(cfg, rdir, tag, run, main_src, y_src, resbos_lines, suffix=None):
