@@ -5607,7 +5607,13 @@ C      Print*, ' QT_V,Q_V ', QT_V,Q_V
       T2=DSQRT(QT_V**2+Q_V**2)
       T3=2.0*ECM*T2
 C      Print*, ' ECM, X**2-1.0 ', ECM, (T1/T3)**2-1.0
-      YMAX=ACOSH(T1/T3)
+C     X<1: no allowed rapidity; integrand vanishes (PDF support x<=1)
+      X=T1/T3
+      IF(X.LT.1.0D0) THEN
+        YMAX=0.0D0
+      ELSE
+        YMAX=ACOSH(X)
+      ENDIF
 
       RETURN
       END ! YMAXIMUM
