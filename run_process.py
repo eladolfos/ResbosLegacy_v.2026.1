@@ -129,7 +129,10 @@ def grid_paths(lines):
 
 def max_safe_q_index(q_vals, ecm):
     """Largest 1-based index i with q_vals[i-1] <= ecm (0 if even q_vals[0] is already too
-    high). q_vals must be ascending (true of every q_grid.inp in this repo)."""
+    high). q_vals must be ascending (true of every q_grid.inp in this repo).
+
+    Q <= ECM is the limit legacy_final_vesion/pert.for's PERTURB imposes (see
+    check_q_kinematics()). Q == ECM is accepted: the shard with Q=1800 at ECM=1800 finished clean."""
     safe = 0
     for i, q in enumerate(q_vals, start=1):
         if q <= ecm:
@@ -142,15 +145,11 @@ def max_safe_q_index(q_vals, ecm):
 def check_q_kinematics(cfg, q_vals, act):
     """Catch a doomed multi-hour run before it starts, for every [energies] entry (active is
     shared across all of them -- see Cfg._parse_energies()). legacy_final_vesion/pert.for's
-    PERTURB (the real-emission piece behind the Y-grid) computes per point:
-        TM_V = sqrt(QT_V^2+Q_V^2);  RTAUP = (TM_V+QT_V)/ECM
-        X1LOW = RTAUP*exp(Y_V);  X2LOW = RTAUP/exp(Y_V)
-    and does `CALL QUIT` (killing the whole shard) the moment BOTH exceed 1 -- first hit at the
-    smallest active qT and the active y closest to 0, where RTAUP~=Q_V/ECM, i.e. any active Q
-    point above ECM is kinematically impossible (a parton can't carry more momentum than its own
-    hadron), not merely slow. Confirmed empirically on a real ppbar/1800 GeV run: every Q-shard
-    with Q<=ECM finished clean with the expected row count; every shard with Q>ECM died within
-    seconds with legacy's own "ERROR IN PERTURB. x1Low, x2Low = ...", "Stopping in QUIT."."""
+    PERTURB computes per point TM_V=sqrt(QT_V^2+Q_V^2), RTAUP=(TM_V+QT_V)/ECM,
+    X1LOW=RTAUP*exp(Y_V), X2LOW=RTAUP/exp(Y_V), and does `CALL QUIT` (killing the whole shard)
+    when BOTH exceed 1. That first happens at the smallest qT and y closest to 0, where
+    RTAUP~=Q_V/ECM, so any active Q above ECM is kinematically impossible. Observed: Q-shards
+    with Q<=ECM finished; shards with Q>ECM died with "ERROR IN PERTURB. x1Low, x2Low = ..."."""
     qmin_idx, qmax_idx, qstep = act[6], act[7], act[8]
     q_active_max = q_vals[qmax_idx - 1]
     bad, safe_idxs = [], []
@@ -164,7 +163,7 @@ def check_q_kinematics(cfg, q_vals, act):
                        f"out of kinematic reach; check [campaign]/[energies] ecm")
         elif qmax_idx > safe_idx:
             bad.append(f"  {energy.name} (ecm={energy.ecm}): active Q goes up to index {qmax_idx} "
-                       f"(Q={q_active_max} GeV) but only Q<=index {safe_idx} (Q={q_vals[safe_idx - 1]} "
+                       f"(Q={q_active_max} GeV) but only up to index {safe_idx} (Q={q_vals[safe_idx - 1]} "
                        f"GeV) is <= this energy's ECM")
     if not bad:
         return
@@ -176,10 +175,7 @@ def check_q_kinematics(cfg, q_vals, act):
                f"       active = {act[0]} {act[1]} {act[2]}  {act[3]} {act[4]} {act[5]}  "
                f"{qmin_idx} {shared_cap} {qstep}\n"
                f"       (that's the cap set by the LOWEST energy below; a HIGHER energy could "
-               f"safely use a larger index -- give it its own .ini with its own [grids] active "
-               f"if you don't want to leave that extra Q range on the table, the way "
-               f"Examples/ppbar_WpWm_CT25_Tevatron_1800_resNLO_NLO.ini / "
-               f"..._1960_resNLO_NLO.ini split Run I/Run II instead of sharing one active range)")
+               f"safely use a larger index -- give it its own .ini with its own [grids] active)")
     else:
         fix = ("no Q index is safe for every energy here -- split [energies] into separate "
                ".ini files, one per energy, each with its own [grids] active")
@@ -191,9 +187,9 @@ def check_q_kinematics(cfg, q_vals, act):
 
 def check_q_kinematics_points(cfg, points, qt_min):
     """Same CALL QUIT failure mode as check_q_kinematics(), for [grids] experimental mode's
-    per-point (y, Q) table instead of a shared rectangular grid -- here each point already has
-    its OWN fixed y (no active sub-range), checked at the mode's shared qt_min (every point runs
-    across the same qT grid -- see build_points()). Checked for every [energies] entry."""
+    per-point (y, Q) table: each point has its own fixed y, checked at the mode's shared qt_min
+    (every point runs across the same qT grid -- see build_points()). Checked for every
+    [energies] entry."""
     bad = []
     for energy in cfg.energies:
         ecm_f = float(energy.ecm)
@@ -215,8 +211,7 @@ def check_q_kinematics_points(cfg, points, qt_min):
         "[energies]/[campaign] ecm -- legacy_final_vesion/pert.for's PERTURB will CALL QUIT "
         "partway through that point's job (parton x>1 is kinematically impossible), after "
         "burning compute on the points before it:\n" + "\n".join(bad) + "\n"
-        "       fix: drop those rows from the experimental data table (or fix [energies]/ecm) -- "
-        "they're outside this energy's kinematic reach")
+        "       fix: drop those rows from the experimental data table (or fix [energies]/ecm)")
 
 
 def patch_stage(cfg, tlines, stage, tag, jw, vtype, ecm):
